@@ -1,0 +1,30 @@
+{
+  "name": "discord-recording-poc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.17.0"
+  },
+  "packageManager": "pnpm@11.22.0",
+  "scripts": {
+    "dev": "tsx --env-file=.env src/bot.ts",
+    "register": "tsx --env-file=.env src/register.ts",
+    "start": "node --env-file=.env dist/bot.js",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "build": "tsc",
+    "export": "tsx --env-file-if-exists=.env src/export-cli.ts"
+  },
+  "dependencies": {
+    "@discordjs/opus": "0.10.0",
+    "@discordjs/voice": "0.19.2",
+    "discord.js": "14.27.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.4",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "5.0.3"
+  }
+}

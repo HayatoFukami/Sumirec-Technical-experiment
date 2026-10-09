@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+recordings/
+*.wav
+*.pcm
+*.opus
+.DS_Store
+*.partial
