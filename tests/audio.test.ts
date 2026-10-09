@@ -18,7 +18,7 @@ describe('時刻と音声ファイル', () => {
     expect(timeline.offset()).toBe(1200);
     expect(timeline.at(1200)).toBe('2026-10-08T00:00:01.200Z');
     expect(() => assertTransition('completed', 'recording')).toThrow();
-    expect(() => assertTransition('awaiting_consent', 'completed')).toThrow();
+    expect(() => assertTransition('preparing', 'completed')).toThrow();
   });
   it('WAVのヘッダー・長さを確定し、既存ファイルを上書きしない', async () => {
     const cfg = await config(); const path = join(cfg.root, 'audio.wav');
@@ -57,7 +57,6 @@ describe('時刻と音声ファイル', () => {
     const session = await new SessionManager(cfg).start(f.options);
     const encoder = new OpusEncoder(48_000, 2);
     try {
-      await session.consent(A, true);
       f.clock.now = 100;
       const pcm = Buffer.alloc(960 * 4);
       for (let i = 0; i < 960; i++) {
@@ -78,7 +77,6 @@ describe('時刻と音声ファイル', () => {
   it('同時発言・10秒の無音・可変長パケット・同一話者の発話再開を配置する', async () => {
     const cfg = await config(); const f = fixture();
     const session = await new SessionManager(cfg).start(f.options);
-    await session.consent(A, true); await session.consent(B, true);
     f.clock.now = 100; f.voice.emit(A, 20); f.voice.emit(B, 20);
     f.clock.now = 120; f.voice.emit(A, 20);
     f.voice.callbacks!.packet(A, Buffer.from([0xf8, 0xff, 0xfe]));
@@ -99,7 +97,6 @@ describe('時刻と音声ファイル', () => {
   });
   it('受信間隔の異常を数え、ジッターによる大きなずれを分割する', async () => {
     const f = fixture([A]); const session = await new SessionManager(await config()).start(f.options);
-    await session.consent(A, true);
     f.clock.now = 100; f.voice.emit(A);
     f.clock.now = 300; f.voice.emit(A);
     await session.stop();
@@ -108,7 +105,7 @@ describe('時刻と音声ファイル', () => {
   });
   it('壊れたWAV・範囲外の時刻・危険な参照パス・symlinkを拒否する', async () => {
     const f = fixture([A]); const session = await new SessionManager(await config()).start(f.options);
-    await session.consent(A, true); f.clock.now = 100; f.voice.emit(A); await session.stop();
+    f.clock.now = 100; f.voice.emit(A); await session.stop();
     const segment = session.metadata.segments[0]!;
     await expect(inspectSegment(session.directory!, { ...segment, file: '../../escape.wav' })).rejects.toThrow('参照');
     await expect(exportMix(session.directory!, { durationMs: Infinity, segments: [] })).rejects.toThrow('上限');

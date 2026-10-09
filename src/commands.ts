@@ -6,12 +6,10 @@ import { DiscordReceiver } from './receiver.js';
 import { SessionManager } from './session.js';
 
 export const recordCommand = new SlashCommandBuilder()
-  .setName('record').setDescription('同意した参加者別に録音する技術検証PoC').setContexts(InteractionContextType.Guild)
-  .addSubcommand((command) => command.setName('start').setDescription('参加中VCの録音を準備し、全員の同意を待つ'))
+  .setName('record').setDescription('開発チームの参加者別にテスト録音する技術検証PoC').setContexts(InteractionContextType.Guild)
+  .addSubcommand((command) => command.setName('start').setDescription('参加中VCへ通知し、テスト録音を開始する'))
   .addSubcommand((command) => command.setName('stop').setDescription('録音を停止し音声ファイルを確定する'))
-  .addSubcommand((command) => command.setName('status').setDescription('録音状態・同意状況・受信件数を表示する'))
-  .addSubcommand((command) => command.setName('consent').setDescription('参加中の録音への同意・撤回を明示する')
-    .addBooleanOption((option) => option.setName('agree').setDescription('true：同意、false：撤回（過去分は保持）').setRequired(true)));
+  .addSubcommand((command) => command.setName('status').setDescription('録音状態・参加人数・受信件数を表示する'));
 
 export function humanParticipants(channel: VoiceChannel): string[] {
   return [...channel.members.values()].filter((member) => !member.user.bot).map((member) => member.id);
@@ -42,16 +40,7 @@ export async function handleCommand(interaction: ChatInputCommandInteraction, ma
       await interaction.editReply('受信を停止しました。ファイルの確定と混合出力が完了すると公開通知します。');
       await stop; return;
     }
-    if (subcommand === 'consent') {
-      if (!existing?.active || member.voice.channelId !== existing.metadata.channelId) throw new Error('録音対象のVCへ参加してから実行してください。');
-      const channel = recordingChannel(interaction.guild, existing.metadata.channelId);
-      if (!channel) throw new Error('対象VCが見つかりません。');
-      await existing.participants(humanParticipants(channel));
-      const agree = interaction.options.getBoolean('agree', true);
-      const change = existing.consent(interaction.user.id, agree);
-      await interaction.editReply(agree ? '録音への同意を受け付けました。状態の公開通知を確認してください。' : '同意を撤回し受信を停止しました。過去分の削除はBot管理者に依頼してください。');
-      await change; return;
-    }
+    if (subcommand !== 'start') throw new Error('このサブコマンドは利用できません。管理者が pnpm register でコマンドを再登録してください。');
     const channel = member.voice.channel;
     if (channel?.type !== ChannelType.GuildVoice) throw new Error('通常のボイスチャンネルへ参加してから実行してください（Stageは対象外）。');
     const botMember = await interaction.guild.members.fetchMe();

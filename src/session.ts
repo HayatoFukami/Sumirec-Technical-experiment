@@ -12,7 +12,7 @@ export interface SessionOptions {
   clock?: Clock; decoderFactory?: () => Decoder;
 }
 const labels: Record<SessionState, string> = {
-  awaiting_consent: '同意・接続待ち（受信停止）', recording: '録音中', stopping: '終了処理中', completed: '完了', failed: '失敗',
+  preparing: '準備・接続待ち（受信停止）', paused: '一時停止（受信停止）', recording: '録音中', stopping: '終了処理中', completed: '完了', failed: '失敗',
 };
 export class RecordingSession {
   readonly metadata: Metadata;
@@ -28,7 +28,7 @@ export class RecordingSession {
   private connectionStarted = false;
   private everReady = false;
   private reservedBytes = 0;
-  private consentTimer?: NodeJS.Timeout;
+  private participantRevision = 0;
   private durationTimer?: NodeJS.Timeout;
   private reconnectTimer?: NodeJS.Timeout;
   private idleTimer?: NodeJS.Timeout;
@@ -41,11 +41,11 @@ export class RecordingSession {
     if (!options.participants.length || new Set(options.participants).size > config.maxParticipants) throw new Error('参加人数が設定上限を超えているか、参加者がいません。');
     this.clock = options.clock ?? systemClock;
     this.metadata = {
-      schemaVersion: 1, sessionId: randomUUID(), guildId: options.guildId, channelId: options.channelId,
+      schemaVersion: 2, sessionId: randomUUID(), guildId: options.guildId, channelId: options.channelId,
       ownerId: options.ownerId, preparedAt: this.clock.wallNow().toISOString(), recordingStartedAt: null,
-      endedAt: null, durationMs: 0, state: 'awaiting_consent',
+      endedAt: null, durationMs: 0, state: 'preparing',
       format: { container: 'WAV', encoding: 'PCM_S16LE', sampleRate: SAMPLE_RATE, channels: CHANNELS },
-      participants: Object.fromEntries(options.participants.map((id) => [id, { present: true, consent: false }])),
+      participants: Object.fromEntries(options.participants.map((id) => [id, { present: true }])),
       users: {}, segments: [], events: [], reconnects: 0, peakParticipants: options.participants.length,
       savedFiles: 0, savedBytes: 0, memoryAtEnd: null, errorCode: null, exportFile: null, exportError: null,
       limitations: [
@@ -59,10 +59,6 @@ export class RecordingSession {
   }
   get active(): boolean { return !this.finalized; }
   private live(): boolean { return !['stopping', 'completed', 'failed'].includes(this.metadata.state); }
-  private allConsent(): boolean {
-    const present = Object.values(this.metadata.participants).filter((p) => p.present);
-    return present.length > 0 && present.every((p) => p.consent);
-  }
   private transition(state: SessionState): void {
     if (state === this.metadata.state) return;
     assertTransition(this.metadata.state, state);
@@ -84,21 +80,15 @@ export class RecordingSession {
       this.directory = await privateDirectory(this.config.root, [this.metadata.guildId, this.metadata.sessionId]);
       await atomicJson(this.directory, this.metadata);
       if (!this.live()) return;
-      await this.options.notify(`録音準備：<#${this.metadata.channelId}> の参加者別音声とユーザーID・時刻をローカルに保存し、録音技術を検証します。現在の参加者全員が /record consent agree:true を実行するまで受信しません。撤回は agree:false。退出・再参加時は再同意が必要です。途中参加・撤回時は全員の録音を一時停止します。過去の音声は撤回だけでは削除されません。削除はBot管理者へ依頼してください。`);
+      await this.options.notify(`録音準備：<#${this.metadata.channelId}> の参加者別音声とユーザーID・時刻をローカルに保存し、録音技術を検証します。開発チーム用のテスト録音のため、同意操作なしで開始し、途中参加・再参加者も自動で録音対象にします。停止は /record stop。保存済みデータの削除はBot管理者へ依頼してください。`);
       if (!this.live()) return;
       this.initialized = true;
-      this.armConsentTimeout();
       this.idleTimer = setInterval(() => { for (const capture of this.captures.values()) capture.idle(); }, 100);
       this.idleTimer.unref();
       this.checkpointTimer = setInterval(() => { void this.enqueue(async () => { if (this.directory && this.live()) { this.metadata.durationMs = this.timeline?.offset() ?? 0; await atomicJson(this.directory, this.metadata); } }); }, 5000);
       this.checkpointTimer.unref();
       await this.reconcile();
     } catch { await this.stop('initialization_error'); throw new Error('録音準備に失敗しました。保存先・通知権限を確認してください。'); }
-  }
-  private armConsentTimeout(): void {
-    if (this.consentTimer || !this.live()) return;
-    this.consentTimer = setTimeout(() => { void this.stop('consent_timeout'); }, this.config.consentTimeoutMs);
-    this.consentTimer.unref();
   }
   private enqueue(task: () => Promise<void>): Promise<void> {
     this.queue = this.queue.then(task).catch(() => { void this.stop('session_operation_error'); });
@@ -112,20 +102,7 @@ export class RecordingSession {
       void promise.then(() => this.flushing.delete(promise));
     }
     this.captures.clear();
-    if (this.metadata.state === 'recording') this.transition('awaiting_consent');
-  }
-  consent(userId: string, agree: boolean): Promise<void> {
-    const participant = this.metadata.participants[snowflake(userId)];
-    if (!this.live() || !participant?.present) throw new Error('対象VC内の参加者だけが同意を変更できます。');
-    if (participant.consent === agree) return this.queue;
-    participant.consent = agree;
-    this.event(agree ? 'consent_granted' : 'consent_revoked', userId);
-    if (!agree) this.freeze();
-    return this.enqueue(async () => {
-      if (!this.live()) return;
-      await this.options.notify(`録音同意が更新されました（同意 ${this.presentConsenting()}/${this.presentCount()}人）。${agree ? '' : '受信を一時停止しました。過去分は保持されます。'}`);
-      await this.reconcileNow();
-    });
+    if (this.metadata.state === 'recording') this.transition('paused');
   }
   participants(userIds: string[]): Promise<void> {
     if (!this.live()) return this.queue;
@@ -134,23 +111,24 @@ export class RecordingSession {
     let changed = false;
     for (const [id, participant] of Object.entries(this.metadata.participants)) {
       if (participant.present && !present.has(id)) {
-        participant.present = false; participant.consent = false; changed = true; this.event('participant_left', id);
+        participant.present = false; changed = true; this.event('participant_left', id);
       }
     }
     for (const id of present) {
       if (!this.metadata.participants[id]?.present) {
-        this.metadata.participants[id] = { present: true, consent: false };
+        this.metadata.participants[id] = { present: true };
         changed = true; this.event('participant_joined', id);
       }
     }
     this.metadata.peakParticipants = Math.max(this.metadata.peakParticipants, present.size);
     if (!changed) return this.queue;
+    this.participantRevision++;
     this.freeze(); // 非同期通知やキューを待たず、先に受信を停止。
     if (present.size > this.config.maxParticipants || Object.keys(this.metadata.participants).length > 500) return this.stop('participant_limit');
     if (!present.size) return this.stop();
     return this.enqueue(async () => {
       if (!this.live()) return;
-      await this.options.notify(`参加者が変わりました。現在 ${present.size}人、同意 ${this.presentConsenting()}人。未同意者がいる間は全員の録音を停止します。再参加者も /record consent が必要です。`);
+      await this.options.notify(`参加者が変わりました。現在 ${this.presentCount()}人。途中参加・再参加者も自動で録音対象にし、通知後に録音を再開します。停止は /record stop。`);
       await this.reconcileNow();
     });
   }
@@ -158,7 +136,7 @@ export class RecordingSession {
   private async reconcileNow(): Promise<void> {
     if (!this.initialized || !this.live()) return;
     if (this.metadata.state === 'recording') return;
-    if (!this.allConsent()) { this.armConsentTimeout(); return; }
+    if (!this.presentCount()) return;
     if (!this.connectionStarted) {
       this.connectionStarted = true;
       try {
@@ -170,19 +148,20 @@ export class RecordingSession {
         this.connected = true;
       } catch { void this.stop('voice_connect_or_dave_error'); return; }
     }
-    if (!this.live() || !this.connected || !this.allConsent()) return;
+    if (!this.live() || !this.connected || !this.presentCount()) return;
+    const revision = this.participantRevision;
     await Promise.all(this.flushing);
-    await this.options.notify(`録音開始・再開：<#${this.metadata.channelId}>、同意済み ${this.presentCount()}人。参加者別WAVを保存しています。停止は /record stop。`);
-    if (!this.live() || !this.connected || !this.allConsent()) return;
+    if (!this.live() || !this.connected || revision !== this.participantRevision) return;
+    await this.options.notify(`録音開始・再開：<#${this.metadata.channelId}>、参加 ${this.presentCount()}人。参加者別WAVを保存します。同意操作は不要です。停止は /record stop。`);
+    if (!this.live() || !this.connected || !this.presentCount() || revision !== this.participantRevision) return;
     if (!this.timeline) {
       this.timeline = new Timeline(this.clock);
       this.metadata.recordingStartedAt = this.timeline.wallStart.toISOString();
       this.durationTimer = setTimeout(() => { this.event('duration_limit'); void this.stop(); }, this.config.maxDurationMs);
       this.durationTimer.unref();
     }
-    clearTimeout(this.consentTimer); this.consentTimer = undefined;
     this.transition('recording');
-    const users = Object.entries(this.metadata.participants).filter(([, p]) => p.present && p.consent).map(([id]) => id);
+    const users = Object.entries(this.metadata.participants).filter(([, p]) => p.present).map(([id]) => id);
     for (const id of users) {
       if (!this.captures.has(id)) {
         const metrics = this.metadata.users[id] ??= emptyMetrics();
@@ -217,15 +196,14 @@ export class RecordingSession {
     }
   }
   private packet(userId: string, packet: Buffer): void {
-    if (this.metadata.state !== 'recording' || !this.connected || !this.allConsent()) return;
+    if (this.metadata.state !== 'recording' || !this.connected) return;
     const participant = this.metadata.participants[userId];
-    if (participant?.present && participant.consent) this.captures.get(userId)?.packet(packet);
+    if (participant?.present) this.captures.get(userId)?.packet(packet);
   }
   presentCount(): number { return Object.values(this.metadata.participants).filter((p) => p.present).length; }
-  presentConsenting(): number { return Object.values(this.metadata.participants).filter((p) => p.present && p.consent).length; }
   status(): string {
     const packets = Object.values(this.metadata.users).reduce((n, m) => n + m.packets, 0);
-    return `状態：${labels[this.metadata.state]}／経過 ${Math.floor((this.live() ? this.timeline?.offset() ?? 0 : this.metadata.durationMs) / 1000)}秒／参加 ${this.presentCount()}人・同意 ${this.presentConsenting()}人／受信 ${packets}パケット・確定 ${this.metadata.savedFiles}ファイル${this.metadata.errorCode ? `／終了理由 ${this.metadata.errorCode}` : ''}`;
+    return `状態：${labels[this.metadata.state]}／経過 ${Math.floor((this.live() ? this.timeline?.offset() ?? 0 : this.metadata.durationMs) / 1000)}秒／参加 ${this.presentCount()}人／受信 ${packets}パケット・確定 ${this.metadata.savedFiles}ファイル${this.metadata.errorCode ? `／終了理由 ${this.metadata.errorCode}` : ''}`;
   }
   stop(errorCode?: string): Promise<void> {
     if (errorCode && this.active) this.metadata.errorCode ??= errorCode;
@@ -234,7 +212,7 @@ export class RecordingSession {
     this.transition('stopping');
     this.metadata.durationMs = this.timeline?.offset() ?? 0;
     this.metadata.endedAt = this.clock.wallNow().toISOString();
-    for (const timer of [this.consentTimer, this.durationTimer, this.reconnectTimer, this.idleTimer, this.checkpointTimer]) clearTimeout(timer);
+    for (const timer of [this.durationTimer, this.reconnectTimer, this.idleTimer, this.checkpointTimer]) clearTimeout(timer);
     try { this.options.voice.close(); } catch { this.metadata.errorCode ??= 'voice_close_error'; }
     this.stopPromise = Promise.resolve().then(async () => {
       await this.queue;

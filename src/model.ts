@@ -1,7 +1,7 @@
 export const SAMPLE_RATE = 48_000;
 export const CHANNELS = 2;
 export const FRAME_BYTES = CHANNELS * 2;
-export type SessionState = 'awaiting_consent' | 'recording' | 'stopping' | 'completed' | 'failed';
+export type SessionState = 'preparing' | 'paused' | 'recording' | 'stopping' | 'completed' | 'failed';
 
 export interface Segment {
   userId: string;
@@ -29,7 +29,7 @@ export interface UserMetrics {
   bytes: number;
 }
 export interface Metadata {
-  schemaVersion: 1;
+  schemaVersion: 2;
   sessionId: string;
   guildId: string;
   channelId: string;
@@ -40,7 +40,7 @@ export interface Metadata {
   durationMs: number;
   state: SessionState;
   format: { container: 'WAV'; encoding: 'PCM_S16LE'; sampleRate: number; channels: number };
-  participants: Record<string, { present: boolean; consent: boolean }>;
+  participants: Record<string, { present: boolean }>;
   users: Record<string, UserMetrics>;
   segments: Segment[];
   events: { at: string; offsetMs: number | null; type: string; userId?: string; value?: string }[];
@@ -77,8 +77,9 @@ export function emptyMetrics(): UserMetrics {
   return { packets: 0, silencePackets: 0, decodeFailures: 0, gapAnomalies: 0, segments: 0, audioDurationMs: 0, bytes: 0 };
 }
 const transitions: Record<SessionState, SessionState[]> = {
-  awaiting_consent: ['recording', 'stopping'],
-  recording: ['awaiting_consent', 'stopping'],
+  preparing: ['recording', 'stopping'],
+  paused: ['recording', 'stopping'],
+  recording: ['paused', 'stopping'],
   stopping: ['completed', 'failed'], completed: [], failed: [],
 };
 export function assertTransition(from: SessionState, to: SessionState): void {

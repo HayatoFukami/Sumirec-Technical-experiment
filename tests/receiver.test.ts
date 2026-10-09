@@ -32,7 +32,7 @@ function fixture() {
 const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 describe('Discord音声受信アダプター', () => {
-  it('DAVEを有効に接続し、同意したユーザーだけをSSRCで紐付けて受信する', async () => {
+  it('DAVEを有効に接続し、指定したユーザーだけをSSRCで紐付けて受信する', async () => {
     const f = fixture(); await f.port.connect(f.callbacks);
     expect(joinVoiceChannel).toHaveBeenLastCalledWith(expect.objectContaining({ selfDeaf: false, selfMute: true, daveEncryption: true }));
     expect(f.connection.receiver.subscriptions.size).toBe(0);
@@ -48,7 +48,7 @@ describe('Discord音声受信アダプター', () => {
     expect(f.connection.listenerCount('stateChange')).toBe(0);
     expect(f.connection.listenerCount('error')).toBe(0);
   });
-  it('自然終了後と撤回直後の再同意で購読を再生成する', async () => {
+  it('自然終了後と購読停止直後の再開で購読を再生成する', async () => {
     const f = fixture(); await f.port.connect(f.callbacks); f.port.setUsers([A]);
     const first = f.connection.receiver.subscriptions.get(A)!;
     first.destroy(); await tick();

@@ -6,7 +6,6 @@ export interface RecordingConfig {
   maxSessionBytes: number;
   maxParticipants: number;
   maxPendingBytes: number;
-  consentTimeoutMs: number;
   reconnectTimeoutMs: number;
   segmentGapMs: number;
 }
@@ -22,7 +21,6 @@ export function recordingConfig(env: NodeJS.ProcessEnv = process.env): Recording
     maxSessionBytes: integer(env, 'MAX_SESSION_BYTES', 536_870_912, 2_000_000_000),
     maxParticipants: integer(env, 'MAX_PARTICIPANTS', 10, 50),
     maxPendingBytes: integer(env, 'MAX_PENDING_BYTES', 4_194_304, 67_108_864),
-    consentTimeoutMs: integer(env, 'CONSENT_TIMEOUT_MS', 300_000, 900_000),
     reconnectTimeoutMs: integer(env, 'RECONNECT_TIMEOUT_MS', 15_000, 60_000),
     segmentGapMs: integer(env, 'SEGMENT_GAP_MS', 250, 2000),
   };

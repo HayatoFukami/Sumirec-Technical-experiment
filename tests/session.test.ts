@@ -4,24 +4,51 @@ import { describe, expect, it, vi } from 'vitest';
 import { SessionManager } from '../src/session.js';
 import { A, B, C, config, fixture } from './helpers.js';
 
-describe('録音セッションと同意', () => {
-  it('開始通知の待機中に撤回されたら受信を開始しない', async () => {
-    const f = fixture([A]);
+describe('開発チームのテスト録音セッション', () => {
+  it('開始通知が完了するまで受信せず、通知待機中に停止したら開始しない', async () => {
+    const f = fixture([A]); const manager = new SessionManager(await config());
     let release!: () => void;
     let entered!: () => void;
     const seen = new Promise<void>((resolve) => { entered = resolve; });
     const blocked = new Promise<void>((resolve) => { release = resolve; });
     f.options.notify = async (message) => { if (message.startsWith('録音開始')) { entered(); await blocked; } };
-    const session = await new SessionManager(await config()).start(f.options);
-    const agree = session.consent(A, true);
+    const start = manager.start(f.options);
     await seen;
-    const revoke = session.consent(A, false);
-    release(); await Promise.all([agree, revoke]);
-    expect(session.metadata.state).toBe('awaiting_consent');
+    const session = manager.get(f.options.guildId)!;
+    expect(session.metadata.state).toBe('preparing');
     expect(f.voice.users).toEqual([]);
     expect(session.metadata.recordingStartedAt).toBeNull();
     f.voice.emit(A); expect(session.metadata.segments).toEqual([]);
+    const stop = session.stop();
+    release(); await Promise.all([start, stop]);
+    expect(session.metadata.state).toBe('completed');
+    expect(f.voice.users).toEqual([]);
+    expect(session.metadata.recordingStartedAt).toBeNull();
+    expect(f.deleted()).toBe(0);
+  });
+  it('開始通知待機中の途中参加は、参加者変更の通知後に自動で録音する', async () => {
+    const f = fixture([A]); const manager = new SessionManager(await config());
+    let release!: () => void; let entered!: () => void;
+    const seen = new Promise<void>((resolve) => { entered = resolve; });
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    let starts = 0;
+    f.options.notify = async (message) => {
+      f.notices.push(message);
+      if (message.startsWith('録音開始') && ++starts === 1) { entered(); await blocked; }
+      if (message.startsWith('参加者')) expect(f.voice.users).toEqual([]);
+    };
+    const start = manager.start(f.options); await seen;
+    const session = manager.get(f.options.guildId)!;
+    const join = session.participants([A, B]);
+    f.voice.emit(B); expect(session.metadata.segments).toEqual([]);
+    release(); await Promise.all([start, join]);
+    expect(starts).toBe(2);
+    expect(f.notices.some((notice) => notice.startsWith('参加者'))).toBe(true);
+    expect(f.voice.users).toEqual([A, B]);
+    expect(session.metadata.state).toBe('recording');
+    f.clock.now = 100; f.voice.emit(B);
     await session.stop();
+    expect(session.metadata.users[B]?.packets).toBe(1);
   });
   it('準備中の停止後に初期化が戻ってもタイマーや受信を再開しない', async () => {
     const f = fixture([A]); const manager = new SessionManager(await config());
@@ -38,16 +65,12 @@ describe('録音セッションと同意', () => {
     expect(f.voice.connects).toBe(0);
     expect(f.voice.closes).toBe(1);
   });
-  it('全員の同意前は接続も受信も開始せず、二重開始を防ぐ', async () => {
+  it('同意操作なしで全参加者の録音を開始し、二重開始と連続停止を安全に扱う', async () => {
     const manager = new SessionManager(await config());
     const f = fixture();
     const pending = manager.start(f.options);
     await expect(manager.start(f.options)).rejects.toThrow('処理中');
     const session = await pending;
-    await session.consent(A, true);
-    expect(f.voice.connects).toBe(0);
-    expect(session.metadata.state).toBe('awaiting_consent');
-    await session.consent(B, true);
     expect(f.voice.connects).toBe(1);
     expect(f.voice.users).toEqual([A, B]);
     expect(session.metadata.state).toBe('recording');
@@ -63,6 +86,9 @@ describe('録音セッションと同意', () => {
     expect(session.metadata.segments[0]?.startOffsetMs).toBe(session.metadata.segments[1]?.startOffsetMs);
     const metadata = JSON.parse(await readFile(join(session.directory!, 'metadata.json'), 'utf8'));
     expect(metadata.state).toBe('completed');
+    expect(metadata.schemaVersion).toBe(2);
+    expect(metadata.participants[A]).toEqual({ present: true });
+    expect(session.status()).not.toContain('同意');
     expect(metadata.memoryAtEnd.rss).toBeGreaterThan(0);
     f.clock.now = 5000;
     expect(session.status()).toContain('経過 0秒');
@@ -72,7 +98,6 @@ describe('録音セッションと同意', () => {
     const f = fixture([A]); const g = fixture([B]);
     g.options.guildId = C;
     const [s, t] = await Promise.all([manager.start(f.options), manager.start(g.options)]);
-    await s.consent(A, true); await t.consent(B, true);
     f.clock.now = 50; f.voice.emit(A);
     await s.stop();
     expect(t.metadata.state).toBe('recording');
@@ -82,44 +107,42 @@ describe('録音セッションと同意', () => {
     expect(again.metadata.sessionId).not.toBe(s.metadata.sessionId);
     await manager.stopAll();
   });
-  it('途中参加・撤回で即時停止し、退出・再参加では同意を取り直す', async () => {
+  it('途中参加・退出・再参加を通知し、自動で対象を更新する', async () => {
     const f = fixture([A]); const session = await new SessionManager(await config()).start(f.options);
-    await session.consent(A, true);
     f.clock.now = 20; f.voice.emit(A);
     const join = session.participants([A, B]);
     expect(f.voice.users).toEqual([]);
     f.voice.emit(A); f.voice.emit(B);
     await join;
-    expect(session.metadata.users[B]).toBeUndefined();
-    await session.consent(B, true);
+    expect(f.voice.users).toEqual([A, B]);
     f.clock.now = 100; f.voice.emit(B);
-    const revoke = session.consent(B, false);
+    const leave = session.participants([A]);
     expect(f.voice.users).toEqual([]);
     f.voice.emit(B);
-    await revoke;
-    await session.participants([A]);
+    await leave;
+    expect(session.metadata.participants[B]?.present).toBe(false);
     expect(f.voice.users).toEqual([A]);
+    f.voice.emit(B); // 退出済みのユーザーは受信アダプターを通さなくても保存しない。
     await session.participants([A, B]);
-    expect(session.metadata.participants[B]?.consent).toBe(false);
-    expect(f.voice.users).toEqual([]);
-    await session.consent(B, true);
-    f.clock.now = 1000; f.voice.emit(A);
+    expect(session.metadata.participants[B]?.present).toBe(true);
+    expect(f.voice.users).toEqual([A, B]);
+    f.clock.now = 1000; f.voice.emit(A); f.voice.emit(B);
     await session.stop();
-    expect(session.metadata.users[B]?.packets).toBe(1);
+    expect(session.metadata.users[B]?.packets).toBe(2);
     expect(session.metadata.users[A]?.packets).toBe(2);
-    expect(session.metadata.savedFiles).toBe(3);
+    expect(session.metadata.savedFiles).toBe(4);
+    expect(session.metadata.events.filter((event) => event.type === 'participant_joined')).toHaveLength(2);
     expect(f.deleted()).toBeGreaterThanOrEqual(4);
   });
   it('再接続時に受信を再開し、切断中の時間を押し詰めない', async () => {
     const f = fixture([A]); const session = await new SessionManager(await config()).start(f.options);
-    await session.consent(A, true);
     f.clock.now = 100; f.voice.emit(A);
     f.voice.callbacks!.state('disconnected');
     expect(f.voice.users).toEqual([]);
     f.voice.emit(A);
     f.clock.now = 1000;
     f.voice.callbacks!.state('ready');
-    await session.consent(A, true); // キューが完了するまで待つ
+    await session.participants([A]); // 変更なしの場合も既存キューの完了を待つ。
     f.voice.emit(A);
     await session.stop();
     expect(session.metadata.reconnects).toBe(1);
@@ -128,7 +151,7 @@ describe('録音セッションと同意', () => {
   it('接続失敗・公開通知失敗を成功扱いせず、資源を解放する', async () => {
     const f = fixture([A]); f.voice.failConnect = true;
     const session = await new SessionManager(await config()).start(f.options);
-    await session.consent(A, true); await session.stop();
+    await session.stop();
     expect(session.metadata.state).toBe('failed');
     expect(session.metadata.errorCode).toBe('voice_connect_or_dave_error');
     expect(f.voice.closes).toBe(1);
@@ -137,11 +160,19 @@ describe('録音セッションと同意', () => {
     await expect(manager.start(g.options)).rejects.toThrow('準備');
     expect(manager.get(g.options.guildId)?.metadata.state).toBe('failed');
     expect(g.voice.closes).toBe(1);
+    const h = fixture([A]);
+    h.options.notify = async (message) => { if (message.startsWith('録音開始')) throw new Error('test'); };
+    const failedNotice = await new SessionManager(await config()).start(h.options);
+    await failedNotice.stop();
+    expect(failedNotice.metadata.state).toBe('failed');
+    expect(failedNotice.metadata.recordingStartedAt).toBeNull();
+    expect(failedNotice.metadata.users).toEqual({});
+    expect(h.voice.users).toEqual([]);
+    expect(h.voice.closes).toBe(1);
   });
   it('容量超過は受信を停止し、既に書いた音声を確定する', async () => {
     const f = fixture([A]); const cfg = await config(); cfg.maxSessionBytes = 4000;
     const session = await new SessionManager(cfg).start(f.options);
-    await session.consent(A, true);
     f.clock.now = 20; f.voice.emit(A);
     f.clock.now = 40; f.voice.emit(A);
     await session.stop();
@@ -153,7 +184,6 @@ describe('録音セッションと同意', () => {
   it('保存エラーを検出し、不完全なセグメントを明示する', async () => {
     const f = fixture([A]); const cfg = await config();
     const session = await new SessionManager(cfg).start(f.options);
-    await session.consent(A, true);
     await symlink(cfg.root, join(session.directory!, 'users'));
     f.clock.now = 20; f.voice.emit(A);
     await session.stop();
@@ -165,40 +195,38 @@ describe('録音セッションと同意', () => {
   it('デコード失敗とキュー容量超過を検出する', async () => {
     const f = fixture([A]); f.options.decoderFactory = () => ({ decode: () => { throw new Error('test'); }, delete: () => {} });
     const session = await new SessionManager(await config()).start(f.options);
-    await session.consent(A, true); f.voice.emit(A); await session.stop();
+    f.voice.emit(A); await session.stop();
     expect(session.metadata.users[A]?.decodeFailures).toBe(1);
     expect(session.metadata.errorCode).toBe('decode_error');
     const g = fixture([A]); const cfg = await config(); cfg.maxPendingBytes = 3000;
     const other = await new SessionManager(cfg).start(g.options);
-    await other.consent(A, true); g.voice.emit(A); await other.stop();
+    g.voice.emit(A); await other.stop();
     expect(other.metadata.errorCode).toBe('pending_buffer_limit');
     expect(other.metadata.savedFiles).toBe(0);
   });
-  it('同意・録音時間・再接続のタイムアウトと無参加を終了させる', async () => {
-    const cfg = await config(); cfg.consentTimeoutMs = 20;
-    const f = fixture([A]); const pending = await new SessionManager(cfg).start(f.options);
-    await vi.waitFor(() => expect(pending.active).toBe(false));
-    expect(pending.metadata.errorCode).toBe('consent_timeout');
+  it('録音時間・再接続のタイムアウトと無参加を終了させる', async () => {
     const g = fixture([A]); const cfg2 = await config(); cfg2.maxDurationMs = 20;
     const timed = await new SessionManager(cfg2).start(g.options);
-    await timed.consent(A, true);
     await vi.waitFor(() => expect(timed.active).toBe(false));
     expect(timed.metadata.state).toBe('completed');
     const h = fixture([A]); const cfg3 = await config(); cfg3.reconnectTimeoutMs = 20;
     const disconnected = await new SessionManager(cfg3).start(h.options);
-    await disconnected.consent(A, true); h.voice.callbacks!.state('disconnected');
+    h.voice.callbacks!.state('disconnected');
     await vi.waitFor(() => expect(disconnected.active).toBe(false));
     expect(disconnected.metadata.errorCode).toBe('reconnect_timeout');
     const j = fixture([A]); const empty = await new SessionManager(await config()).start(j.options);
     await empty.participants([]); expect(empty.metadata.state).toBe('completed');
   });
-  it('未参加者の同意・人数上限超過・停止後の同意を拒否する', async () => {
+  it('未参加者の音声を保存せず、人数上限超過と停止後の更新を安全に扱う', async () => {
     const cfg = await config(); cfg.maxParticipants = 1;
     const f = fixture([A]); const manager = new SessionManager(cfg);
     await expect(manager.start(fixture().options)).rejects.toThrow('上限');
     const s = await manager.start(f.options);
-    expect(() => s.consent(B, true)).toThrow('参加者');
+    f.voice.emit(B);
+    expect(s.metadata.users[B]).toBeUndefined();
     await s.participants([A, B]); expect(s.metadata.errorCode).toBe('participant_limit');
-    expect(() => s.consent(A, true)).toThrow('参加者');
+    await s.participants([A]);
+    expect(f.voice.users).toEqual([]);
+    expect(s.metadata.state).toBe('failed');
   });
 });
