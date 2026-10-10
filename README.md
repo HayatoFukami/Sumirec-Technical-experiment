@@ -2,7 +2,7 @@
 
 Discordの通常のボイスチャンネルから、開発チームの参加者の音声をユーザー別に録音する技術検証用Botです。参加者別WAV、発話セグメントの推定時刻、検証用混合WAVをローカルに保存します。STT・議事録生成・Web画面・外部ストレージは実装していません。
 
-**実Discordでの接続・録音は未検証です。** 自動テスト、実Opusのデコード、WAV形式、無音・重なりの復元は検証済みです。結果の詳細は [検証レポート](docs/recording-poc-report.md) を参照してください。
+**今回の修正後の実Discordでの接続・録音は未検証です。** 自動テスト、実Opusのデコード、WAV形式、無音・重なりの復元は検証済みです。複数人録音の不具合調査と既存データの検査結果は [検証レポート](docs/recording-poc-report.md#11-複数ユーザー録音の不具合調査2026-10-10) を参照してください。
 
 ## 必要環境
 
@@ -83,6 +83,7 @@ pnpm start
 | `MAX_PENDING_BYTES` | `4194304`：ユーザーごとのPCM書き込み待ち上限4MiB（設定上限64MiB） |
 | `RECONNECT_TIMEOUT_MS` | `15000`：接続を再びReadyにするまでの制限15秒（設定上限60秒） |
 | `SEGMENT_GAP_MS` | `250`：パケット未到着による区間分割・確定の目安（設定上限2秒） |
+| `RECORDING_DIAGNOSTICS` | `false`：`true`で受信経路の詳細診断を機密の`metadata.json`へ保存。変更後はBotを再起動 |
 
 上限値は正の整数で指定します。個別録音の容量上限にメタデータや混合音声は含みません。混合WAVも同じく192,000 bytes/秒で、15分なら約173MBが追加されます。保存先全体の空き容量は管理者が確認してください。セグメント数10,000、イベント数20,000、セッション中の累計参加ユーザー数500も上限とし、超過時は停止します。
 
@@ -112,6 +113,26 @@ Discordの標準無音終端パケット、長いパケット間隔、80msを超
 メトリクスは、ユーザー別パケット数・標準無音パケット数・デコード失敗数・受信間隔異常数・セグメント数・保存PCM時間・容量、ピーク参加人数、保存ファイル総数、接続状態変化、再接続回数、録音終了時の `process.memoryUsage()` です。`audioDurationMs` は保存PCM時間であり、VADで測った実発話時間ではありません。パケットロス率は算出しません。
 
 メタデータは5秒ごとと終了時に一時ファイル＋renameで更新します。作成するディレクトリは0700、ファイルは0600です。既存の保存先も管理者が専有し、他者の書き込みを許さないでください。Discord ID・UUID・ファイル参照を検査し、配下のsymlinkを拒否します。ルートの親ディレクトリは管理者が信頼できる場所を選んでください。`.env`・既定の録音先・音声・ビルド成果物はGitから除外しています。独自の保存先をリポジトリ内に設定する場合は、そのディレクトリも `.gitignore` へ追加してください。
+
+### 複数人録音が欠ける場合の診断
+
+`.env`で `RECORDING_DIAGNOSTICS=true` を設定してBotを再起動し、下記の手動テストを実施します。診断はコンソールやDiscordへ出さず、5秒ごとと終了時に `metadata.json` の `diagnostics` へ保存します。`schemaVersion: 2`の追加フィールドであり、古いデータは移行不要です。`users`にも `decodeSuccesses`（標準無音終端を除くデコード成功数）、`savedSamples`（書き込み確定済みのチャンネルあたりPCMフレーム数）を追加します。保存時間は `savedSamples / 48000` 秒です。
+
+| 観測値 | 調べる段階 |
+|---|---|
+| `diagnostics.receiver.users[id].subscriptionsStarted = 0` | 対象参加者一覧・購読開始。参加変更、`subscriptions_requested`、`subscription_start/stop/wait_close/close`の順序を確認 |
+| `ssrcKnown = false` / `unknownSsrcPackets`が増加 | SSRC対応未登録・削除。`ssrc_create/update/delete`を確認。未知SSRCのパケットを特定ユーザーに推測で結び付けない |
+| `rtpPackets = 0` | ユーザーへ対応済みの音声RTPが到着していない。ミュート、UDP経路、SSRC、通知による受信停止を確認 |
+| `rtpPackets > 0`、`opusPackets = 0` | 輸送復号・DAVE復号・購読への配送の間で未配送。DAVEの `failureSignals`、`receive_or_decrypt_error`、鍵状態、購読履歴を照合 |
+| `opusPackets > 0`、`users[id].decodeSuccesses = 0` | Opusデコードまたは標準無音終端。`silencePackets`、`decodeFailures`、`opus_decode_error`を確認 |
+| `decodeSuccesses > 0`、`savedSamples = 0` | 書き込み待ち・上限・保存失敗。終了後のセグメントと`pcm_storage_error`を確認 |
+| `savedSamples > 0`なのにプレーヤーで0秒表示 | 実WAVのフレーム数・ヘッダー・短い区間の表示丸めを確認。個別WAVと混合WAVを別々に検査 |
+
+`rtpPackets`は対象ユーザーの購読希望期間に到着した、SSRC対応済みのRTPヘッダーの観測数です。`opusPackets`は保存処理へ渡した復号後パケット数（標準無音終端を含む）です。どちらも送信総数・ロス率ではありません。`speakingStarts`と`speaking_start`もRTP到着に基づくライブラリの検知で、実発話や復号成功の証拠にはなりません。停止後の `desired/subscribed = false` は正常です。SSRCやDAVE状態はスナップショット時点の値であり、履歴も併せて確認してください。
+
+DAVEの `failureSignals` は0.19.2の既知debug通知を接続全体で数えます。ユーザーIDを含まない通知のため、ユーザー別復号失敗数は得られません。正常話者の復号成功でライブラリの連続失敗数がリセットされても、この診断件数は累積します。生のdebugメッセージ・外部例外のmessage/stack・音声・鍵・トークンは保存しません。
+
+イベントは最大2,000件、ユーザー集計は最大500人です。超過イベントは `droppedEvents` に集計し、診断上限だけでは録音を停止しません。最後のエラー分類は `lastError` に残します。パケットごとのイベントは作らず、DAVE失敗イベントは初回と累計件数が倍増したときだけ記録します。UDP・DAVEの交換時に診断リスナーを付け直し、停止時に解除します。依存バージョン変更時はこの診断経路も再検証が必要です。
 
 ## 再生と混合音声
 
@@ -151,6 +172,8 @@ ffmpeg -v error -i "segment-0001.wav" -f null -
 
 各試験は対象VCへ入って `/record start`、公開開始通知を確認して発言、`/record stop`、公開完了通知の順に実施します。個別WAVの聴取、形式/長さ、メタデータのユーザー対応、混合WAVの時間配置を照合します。同期用に「開始後5秒でA、10秒でB」のような既知の合図を使い、開始位置の差をmsで記録します。
 
+今回の再検証では診断を有効にし、T2を「A先行」「B先行」の別セッションで実施してください。各人が5秒以上発言し、交互発言、T3の同時発言、T6の3人同時発言、T5の退出・再参加、T9の再接続を続けて確認します。正常話者の声が保存される間に別話者の `rtpPackets` だけが増える場合は、DAVE失敗集計と購読履歴を保存して比較してください。未受信と無言、短いWAVと空のWAVを区別し、音声・実ユーザーID・メタデータ全文をGitへ追加しないでください。
+
 | ID | 方法 | 確認方法・期待結果 |
 |---|---|---|
 | T1 | 1人で30秒、start後に追加操作なしで発言 | 公開開始通知後に自動で録音され、本人の声を本人のディレクトリで再生できる |
@@ -177,6 +200,7 @@ ffmpeg -v error -i "segment-0001.wav" -f null -
 | `src/receiver.ts` | 実Discord接続、DAVE確認、ユーザー別VoiceReceiver購読、解放 |
 | `src/capture.ts` / `src/storage.ts` | Opusデコード、サイズ制限付き逐次書き込み、WAV確定、パス検査 |
 | `src/model.ts` / `src/config.ts` | メタデータ型、単調時計、状態遷移、設定検証 |
+| `src/diagnostics.ts` | 診断用の型と秘密情報を含めない固定エラー分類 |
 | `src/export.ts` / `src/export-cli.ts` | WAV検査、時刻配置・混合、終了済みセッションの再出力 |
 | `tests/` | Discord実接続をしない状態・参加者・障害・実Opus・音声配置・受信購読テスト |
 | `docs/recording-poc-report.md` | 検証環境、結果、未検証事項、残課題 |

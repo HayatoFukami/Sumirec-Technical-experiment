@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { CHANNELS, FRAME_BYTES, SAMPLE_RATE, type Metadata, type Segment, Timeline, type UserMetrics } from './model.js';
 import { privateDirectory, snowflake, WavWriter } from './storage.js';
 import type { RecordingConfig } from './config.js';
+import { errorCategory, type DiagnosticEvent } from './diagnostics.js';
 
 export interface Decoder { decode(packet: Buffer): Buffer; delete(): void }
 export const createDecoder = (): Decoder => {
@@ -35,6 +36,7 @@ export class UserCapture {
     private readonly reserve: (bytes: number) => boolean,
     private readonly fail: (code: string) => void,
     private readonly decoder: Decoder = createDecoder(),
+    private readonly diagnostic?: (event: DiagnosticEvent) => void,
   ) { snowflake(userId); }
 
   packet(packet: Buffer): void {
@@ -52,11 +54,13 @@ export class UserCapture {
     try {
       pcm = this.decoder.decode(packet);
       if (!pcm.length || pcm.length % FRAME_BYTES !== 0) throw new Error('不正なPCM');
-    } catch {
+    } catch (error) {
       this.metrics.decodeFailures++;
+      this.diagnostic?.({ type: 'opus_decode_error', userId: this.userId, value: errorCategory(error) });
       this.fail('decode_error');
       return;
     }
+    this.metrics.decodeSuccesses = (this.metrics.decodeSuccesses ?? 0) + 1;
     const samples = pcm.length / FRAME_BYTES;
     const duration = samples / SAMPLE_RATE * 1000;
     if (this.lastArrival !== undefined && arrival - this.lastArrival > this.config.segmentGapMs) this.endSegment();
@@ -103,7 +107,11 @@ export class UserCapture {
   }
 
   private enqueue(task: () => Promise<void>, segment: ActiveSegment): void {
-    this.tail = this.tail.then(task).catch(() => { segment.failed = true; this.fail('storage_error'); });
+    this.tail = this.tail.then(task).catch((error: unknown) => {
+      segment.failed = true;
+      this.diagnostic?.({ type: 'pcm_storage_error', userId: this.userId, value: errorCategory(error) });
+      this.fail('storage_error');
+    });
   }
   idle(): void {
     if (this.current && this.lastArrival !== undefined && this.timeline.offset() - this.lastArrival >= this.config.segmentGapMs) this.endSegment();
@@ -123,9 +131,12 @@ export class UserCapture {
       segment.data.complete = !segment.failed;
       this.metrics.segments++;
       this.metrics.audioDurationMs += segment.data.durationMs;
+      this.metrics.savedSamples = (this.metrics.savedSamples ?? 0) + segment.data.samples;
       this.metrics.bytes += segment.data.bytes;
       this.metadata.savedFiles++;
       this.metadata.savedBytes += segment.data.bytes;
+      this.diagnostic?.({ type: 'segment_finalized', userId: this.userId,
+        value: `samples=${segment.data.samples};durationMs=${segment.data.durationMs};complete=${segment.data.complete}` });
     }, segment);
   }
   close(): Promise<void> {

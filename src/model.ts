@@ -1,3 +1,4 @@
+import type { RecordingDiagnostics } from './diagnostics.js';
 export const SAMPLE_RATE = 48_000;
 export const CHANNELS = 2;
 export const FRAME_BYTES = CHANNELS * 2;
@@ -23,6 +24,8 @@ export interface UserMetrics {
   packets: number;
   silencePackets: number;
   decodeFailures: number;
+  decodeSuccesses?: number;
+  savedSamples?: number;
   gapAnomalies: number;
   segments: number;
   audioDurationMs: number;
@@ -53,6 +56,7 @@ export interface Metadata {
   exportFile: string | null;
   exportError: string | null;
   limitations: string[];
+  diagnostics?: RecordingDiagnostics;
 }
 
 export interface Clock {
@@ -74,7 +78,7 @@ export class Timeline {
   at(offset: number): string { return new Date(this.wallStart.getTime() + offset).toISOString(); }
 }
 export function emptyMetrics(): UserMetrics {
-  return { packets: 0, silencePackets: 0, decodeFailures: 0, gapAnomalies: 0, segments: 0, audioDurationMs: 0, bytes: 0 };
+  return { packets: 0, silencePackets: 0, decodeFailures: 0, decodeSuccesses: 0, savedSamples: 0, gapAnomalies: 0, segments: 0, audioDurationMs: 0, bytes: 0 };
 }
 const transitions: Record<SessionState, SessionState[]> = {
   preparing: ['recording', 'stopping'],

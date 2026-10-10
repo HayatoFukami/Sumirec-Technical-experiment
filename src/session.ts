@@ -5,6 +5,7 @@ import { exportMix } from './export.js';
 import { CHANNELS, SAMPLE_RATE, Timeline, assertTransition, emptyMetrics, systemClock, type Clock, type Metadata, type SessionState } from './model.js';
 import type { VoicePort } from './receiver.js';
 import { atomicJson, privateDirectory, snowflake } from './storage.js';
+import type { DiagnosticEvent } from './diagnostics.js';
 
 export interface SessionOptions {
   guildId: string; channelId: string; ownerId: string; participants: string[];
@@ -53,8 +54,9 @@ export class RecordingSession {
         '時刻は復号後パケット到着時刻とPCMサンプル数からの推定です。送信側時刻・RTP連番は公開ストリームから取得していません。',
         'ジッター、順序逆転、欠落、最初のパケットの境界誤差、80ms以内の時間誤差を完全には復元できません。',
         '発話時間は保存PCMの長さです。VADによる実発話時間ではなく、マイク回り込みや通常の無音PCMも含み得ます。',
-        'DAVEの内部復号失敗で破棄されたパケットは件数を取得できません。パケットロス率は算出しません。',
+        'DAVE復号失敗の診断は0.19.2のdebug通知の集計です。ユーザー別の正確な復号失敗数・パケットロス率は算出しません。',
       ],
+      ...(config.diagnostics ? { diagnostics: { events: [], droppedEvents: 0 } } : {}),
     };
   }
   get active(): boolean { return !this.finalized; }
@@ -74,6 +76,18 @@ export class RecordingSession {
       return;
     }
     this.metadata.events.push({ at: this.clock.wallNow().toISOString(), offsetMs: this.timeline?.offset() ?? null, type, ...(userId ? { userId } : {}), ...(value ? { value } : {}) });
+    if (type.startsWith('participant_')) this.diagnostic({ type, ...(userId ? { userId } : {}) });
+  }
+  private diagnostic(event: DiagnosticEvent): void {
+    const diagnostics = this.metadata.diagnostics;
+    if (!diagnostics) return;
+    const entry = { ...event, at: this.clock.wallNow().toISOString(), offsetMs: this.timeline?.offset() ?? null };
+    if (event.type.endsWith('_error') || event.type === 'dave_keys_unavailable' || event.type === 'dave_unavailable' || event.type === 'ssrc_mapping_missing') diagnostics.lastError = entry;
+    if (diagnostics.events.length >= 2000) { diagnostics.droppedEvents++; return; }
+    diagnostics.events.push(entry);
+  }
+  private snapshotDiagnostics(): void {
+    if (this.metadata.diagnostics) this.metadata.diagnostics.receiver = this.options.voice.diagnostics?.();
   }
   async initialize(): Promise<void> {
     try {
@@ -85,7 +99,7 @@ export class RecordingSession {
       this.initialized = true;
       this.idleTimer = setInterval(() => { for (const capture of this.captures.values()) capture.idle(); }, 100);
       this.idleTimer.unref();
-      this.checkpointTimer = setInterval(() => { void this.enqueue(async () => { if (this.directory && this.live()) { this.metadata.durationMs = this.timeline?.offset() ?? 0; await atomicJson(this.directory, this.metadata); } }); }, 5000);
+      this.checkpointTimer = setInterval(() => { void this.enqueue(async () => { if (this.directory && this.live()) { this.metadata.durationMs = this.timeline?.offset() ?? 0; this.snapshotDiagnostics(); await atomicJson(this.directory, this.metadata); } }); }, 5000);
       this.checkpointTimer.unref();
       await this.reconcile();
     } catch { await this.stop('initialization_error'); throw new Error('録音準備に失敗しました。保存先・通知権限を確認してください。'); }
@@ -144,6 +158,7 @@ export class RecordingSession {
           packet: (id, packet) => this.packet(id, packet),
           state: (status) => this.voiceState(status),
           failure: (code) => { void this.stop(code); },
+          ...(this.config.diagnostics ? { diagnostic: (event: DiagnosticEvent) => this.diagnostic(event) } : {}),
         });
         this.connected = true;
       } catch { void this.stop('voice_connect_or_dave_error'); return; }
@@ -167,10 +182,12 @@ export class RecordingSession {
         const metrics = this.metadata.users[id] ??= emptyMetrics();
         this.captures.set(id, new UserCapture(id, this.directory!, this.metadata, this.timeline, this.config, metrics,
           (bytes) => { if (this.reservedBytes + bytes > this.config.maxSessionBytes) return false; this.reservedBytes += bytes; return true; },
-          (code) => { void this.stop(code); }, (this.options.decoderFactory ?? createDecoder)()));
+          (code) => { void this.stop(code); }, (this.options.decoderFactory ?? createDecoder)(),
+          this.config.diagnostics ? (event) => this.diagnostic(event) : undefined));
       }
     }
     this.options.voice.setUsers(users);
+    this.snapshotDiagnostics();
   }
   private voiceState(status: string): void {
     if (!this.live()) return;
@@ -217,6 +234,7 @@ export class RecordingSession {
     this.stopPromise = Promise.resolve().then(async () => {
       await this.queue;
       await Promise.all(this.flushing);
+      this.snapshotDiagnostics();
       this.metadata.memoryAtEnd = process.memoryUsage();
       if (this.directory) {
         try { await atomicJson(this.directory, this.metadata); }
@@ -245,6 +263,7 @@ export class RecordingSession {
 export class SessionManager {
   private readonly sessions = new Map<string, RecordingSession>();
   constructor(private readonly config: RecordingConfig) {}
+  get diagnosticsEnabled(): boolean { return this.config.diagnostics === true; }
   get(guildId: string): RecordingSession | undefined { return this.sessions.get(guildId); }
   async start(options: SessionOptions): Promise<RecordingSession> {
     if (this.sessions.get(options.guildId)?.active) throw new Error('このサーバーには処理中の録音セッションがあります。');

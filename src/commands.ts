@@ -50,7 +50,7 @@ export async function handleCommand(interaction: ChatInputCommandInteraction, ma
     const session = await manager.start({
       guildId: interaction.guildId, channelId: channel.id, ownerId: interaction.user.id,
       participants: humanParticipants(channel),
-      voice: new DiscordReceiver(interaction.guildId, channel.id, interaction.guild.voiceAdapterCreator),
+      voice: new DiscordReceiver(interaction.guildId, channel.id, interaction.guild.voiceAdapterCreator, { diagnostics: manager.diagnosticsEnabled }),
       notify: async (message) => { await channel.send({ content: message, allowedMentions: { parse: [] } }); },
     });
     await interaction.editReply(session.status());

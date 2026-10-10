@@ -8,6 +8,7 @@ export interface RecordingConfig {
   maxPendingBytes: number;
   reconnectTimeoutMs: number;
   segmentGapMs: number;
+  diagnostics?: boolean;
 }
 function integer(env: NodeJS.ProcessEnv, key: string, fallback: number, max: number): number {
   const value = Number(env[key] ?? fallback);
@@ -15,7 +16,9 @@ function integer(env: NodeJS.ProcessEnv, key: string, fallback: number, max: num
   return value;
 }
 export function recordingConfig(env: NodeJS.ProcessEnv = process.env): RecordingConfig {
+  if (env.RECORDING_DIAGNOSTICS !== undefined && !['true', 'false'].includes(env.RECORDING_DIAGNOSTICS)) throw new Error('RECORDING_DIAGNOSTICSはtrueまたはfalseで指定してください。');
   return {
+    diagnostics: env.RECORDING_DIAGNOSTICS === 'true',
     root: resolve(env.RECORDINGS_DIR ?? './recordings'),
     maxDurationMs: integer(env, 'MAX_DURATION_MS', 900_000, 3_600_000),
     maxSessionBytes: integer(env, 'MAX_SESSION_BYTES', 536_870_912, 2_000_000_000),

@@ -5,6 +5,24 @@ import { SessionManager } from '../src/session.js';
 import { A, B, C, config, fixture } from './helpers.js';
 
 describe('開発チームのテスト録音セッション', () => {
+  it('診断イベントの上限で録音を止めず、最後のエラーと集計を保持する', async () => {
+    const cfg = await config(); cfg.diagnostics = true;
+    const f = fixture([A]); const session = await new SessionManager(cfg).start(f.options);
+    for (let i = 0; i < 2100; i++) f.voice.callbacks!.diagnostic!({ type: 'speaking_start', userId: A });
+    f.voice.callbacks!.diagnostic!({ type: 'receive_or_decrypt_error', userId: A, value: 'range_error' });
+    expect(session.metadata.diagnostics?.events).toHaveLength(2000);
+    expect(session.metadata.diagnostics?.droppedEvents).toBe(101);
+    expect(session.metadata.diagnostics?.lastError).toMatchObject({ type: 'receive_or_decrypt_error', userId: A });
+    expect(session.metadata.state).toBe('recording');
+    f.clock.now = 100; f.voice.emit(A); await session.stop();
+    expect(session.metadata.users[A]?.savedSamples).toBe(960);
+    const stored = JSON.parse(await readFile(join(session.directory!, 'metadata.json'), 'utf8'));
+    expect(stored.diagnostics.events).toHaveLength(2000);
+    expect(stored.diagnostics.lastError.value).toBe('range_error');
+    const g = fixture([A]); const disabled = await new SessionManager(await config()).start(g.options);
+    expect(g.voice.callbacks?.diagnostic).toBeUndefined();
+    await disabled.stop(); expect(disabled.metadata.diagnostics).toBeUndefined();
+  });
   it('開始通知が完了するまで受信せず、通知待機中に停止したら開始しない', async () => {
     const f = fixture([A]); const manager = new SessionManager(await config());
     let release!: () => void;

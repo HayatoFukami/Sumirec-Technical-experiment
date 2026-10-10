@@ -123,6 +123,9 @@ describe('時刻と音声ファイル', () => {
   it('設定値を制限し、空の会議も無音WAVとして復元できる', async () => {
     expect(() => recordingConfig({ MAX_DURATION_MS: '0' })).toThrow();
     expect(() => recordingConfig({ MAX_PENDING_BYTES: 'NaN' })).toThrow();
+    expect(() => recordingConfig({ RECORDING_DIAGNOSTICS: 'yes' })).toThrow();
+    expect(recordingConfig({}).diagnostics).toBe(false);
+    expect(recordingConfig({ RECORDING_DIAGNOSTICS: 'true' }).diagnostics).toBe(true);
     const cfg = await config();
     const result = await exportMix(cfg.root, { durationMs: 100, segments: [] });
     const wav = await readFile(join(cfg.root, result.file));
