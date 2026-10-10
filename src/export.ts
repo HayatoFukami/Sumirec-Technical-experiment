@@ -5,7 +5,7 @@ import type { FileHandle } from 'node:fs/promises';
 import { CHANNELS, FRAME_BYTES, SAMPLE_RATE, type Segment } from './model.js';
 import { contained, privateDirectory, snowflake, WavWriter, wavHeader } from './storage.js';
 
-export interface ExportInput { durationMs: number; segments: Segment[] }
+export interface ExportInput { durationMs: number; segments: Segment[]; silenceCleanup?: { entries: { state: string }[] } }
 export async function readFully(handle: FileHandle, size: number, position: number): Promise<Buffer> {
   const data = Buffer.alloc(size);
   let offset = 0;
@@ -16,27 +16,35 @@ export async function readFully(handle: FileHandle, size: number, position: numb
   }
   return data;
 }
-async function segmentHandle(directory: string, segment: Segment): Promise<FileHandle> {
+export async function segmentPath(directory: string, segment: Segment): Promise<string> {
   snowflake(segment.userId);
   if (!new RegExp(`^users/${segment.userId}/segment-\\d{4,5}\\.wav$`).test(segment.file)) throw new Error('音声ファイル参照が不正です。');
   for (const part of [directory, join(directory, 'users'), join(directory, 'users', segment.userId)]) {
     const stat = await lstat(part);
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('音声ディレクトリが不正です。');
   }
-  return open(contained(directory, segment.file), constants.O_RDONLY | constants.O_NOFOLLOW);
+  return contained(directory, segment.file);
+}
+export async function segmentHandle(directory: string, segment: Segment): Promise<FileHandle> {
+  return open(await segmentPath(directory, segment), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+}
+export async function validateSegmentWav(handle: FileHandle, segment: Segment): Promise<void> {
+  const stat = await handle.stat();
+  const bytes = segment.samples * FRAME_BYTES;
+  if (!Number.isSafeInteger(segment.samples) || segment.samples < 0 ||
+    !stat.isFile() || stat.size !== bytes + 44 || segment.bytes !== stat.size ||
+    !(await readFully(handle, 44, 0)).equals(wavHeader(bytes))) throw new Error('WAV形式・サイズが一致しません。');
 }
 export async function inspectSegment(directory: string, segment: Segment): Promise<void> {
   const handle = await segmentHandle(directory, segment);
   try {
-    const stat = await handle.stat();
-    const bytes = segment.samples * FRAME_BYTES;
-    if (!stat.isFile() || stat.size !== bytes + 44 || segment.bytes !== stat.size ||
-      !(await readFully(handle, 44, 0)).equals(wavHeader(bytes))) throw new Error('WAV形式・サイズが一致しません。');
+    await validateSegmentWav(handle, segment);
   } finally { await handle.close(); }
 }
 
 // 1秒ごとのブロックで混合する。録音全体や全入力をメモリへ読み込まない。
 export async function exportMix(directory: string, input: ExportInput): Promise<{ file: string; bytes: number; gain: number; clippedSamples: number }> {
+  if (input.silenceCleanup?.entries.some((entry) => entry.state === 'pending')) throw new Error('無音削除の復旧が必要です。');
   if (!Number.isFinite(input.durationMs) || input.durationMs < 0 || input.durationMs > 3_601_000 ||
     !Array.isArray(input.segments) || input.segments.length > 10_000) throw new Error('混合出力の上限を超えています。');
   const segments = input.segments.filter((s) => s.complete);

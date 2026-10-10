@@ -57,6 +57,18 @@ export interface Metadata {
   exportError: string | null;
   limitations: string[];
   diagnostics?: RecordingDiagnostics;
+  silenceCleanup?: {
+    version: 1;
+    entries: {
+      segment: Segment;
+      identity: { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number };
+      state: 'pending' | 'deleted';
+      error?: 'inspection_failed' | 'delete_failed' | 'file_changed';
+    }[];
+    retained: { file: string; reason: 'inspection_failed' }[];
+    deletedSegments: number;
+    deletedBytes: number;
+  };
 }
 
 export interface Clock {

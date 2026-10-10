@@ -14,7 +14,8 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "build": "tsc",
-    "export": "tsx --env-file-if-exists=.env src/export-cli.ts"
+    "export": "tsx --env-file-if-exists=.env src/export-cli.ts",
+    "recover-silence": "tsx --env-file-if-exists=.env src/recover-silence-cli.ts"
   },
   "dependencies": {
     "@discordjs/opus": "0.10.0",

@@ -41,6 +41,12 @@ export async function atomicJson(directory: string, value: unknown): Promise<voi
   try { await handle.writeFile(JSON.stringify(value, null, 2)); await handle.sync(); }
   finally { await handle.close(); }
   await rename(path, join(directory, 'metadata.json'));
+  await syncDirectory(directory);
+}
+export async function syncDirectory(directory: string): Promise<void> {
+  const handle = await open(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try { await handle.sync(); }
+  finally { await handle.close(); }
 }
 export function wavHeader(bytes: number): Buffer {
   if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes % FRAME_BYTES !== 0 || bytes > 0xffffffff - 36) throw new Error('WAVサイズが不正です。');

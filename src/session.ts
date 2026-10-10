@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { RecordingConfig } from './config.js';
 import { UserCapture, createDecoder, type Decoder } from './capture.js';
 import { exportMix } from './export.js';
+import { cleanupSilentSegments } from './silence.js';
 import { CHANNELS, SAMPLE_RATE, Timeline, assertTransition, emptyMetrics, systemClock, type Clock, type Metadata, type SessionState } from './model.js';
 import type { VoicePort } from './receiver.js';
 import { atomicJson, privateDirectory, snowflake } from './storage.js';
@@ -239,7 +240,16 @@ export class RecordingSession {
       if (this.directory) {
         try { await atomicJson(this.directory, this.metadata); }
         catch { this.metadata.errorCode ??= 'metadata_write_error'; }
-        if (this.timeline && this.metadata.savedFiles) {
+        let cleanupReady = false;
+        const hadFiles = this.metadata.savedFiles > 0;
+        try {
+          await cleanupSilentSegments(this.directory, this.metadata);
+          const cleanup = this.metadata.silenceCleanup!;
+          cleanupReady = !cleanup.entries.some((entry) => entry.state === 'pending');
+          if (!cleanupReady || cleanup.retained.length) this.metadata.errorCode ??= 'silence_cleanup_error';
+        } catch { this.metadata.errorCode ??= 'silence_cleanup_error'; }
+        if (!cleanupReady) this.metadata.exportError = 'silence_cleanup_pending';
+        if (this.timeline && hadFiles && cleanupReady) {
           try {
             const result = await exportMix(this.directory, this.metadata);
             this.metadata.exportFile = result.file;
@@ -252,7 +262,7 @@ export class RecordingSession {
         try { await atomicJson(this.directory, this.metadata); }
         catch { this.metadata.errorCode ??= 'metadata_write_error'; this.metadata.state = 'failed'; }
       }
-      try { await this.options.notify(`録音停止：<#${this.metadata.channelId}>。${this.status()}。${this.metadata.savedFiles ? '音声とメタデータを管理者のローカル保存先に保存しました。' : '保存音声はありません。'}${this.metadata.exportError ? '混合出力に失敗しました。個別ファイルを確認してください。' : ''}`); }
+      try { await this.options.notify(`録音停止：<#${this.metadata.channelId}>。${this.status()}。${this.metadata.savedFiles ? '音声とメタデータを管理者のローカル保存先に保存しました。' : '保存音声はありません。'}完全無音の個別WAVを ${this.metadata.silenceCleanup?.deletedSegments ?? 0}件削除しました。${this.metadata.exportError ? '混合出力に失敗しました。個別ファイルとメタデータの削除記録を確認してください。' : ''}`); }
       catch { this.metadata.errorCode ??= 'stop_notification_error'; this.metadata.state = 'failed'; if (this.directory) await atomicJson(this.directory, this.metadata).catch(() => undefined); }
       this.finalized = true;
     });
