@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
+import type { OpusEncoder } from '@discordjs/opus';
 import { CHANNELS, FRAME_BYTES, SAMPLE_RATE, type Metadata, type Segment, Timeline, type UserMetrics } from './model.js';
 import { privateDirectory, snowflake, WavWriter } from './storage.js';
 import type { RecordingConfig } from './config.js';
@@ -10,7 +11,7 @@ const Opus = require('@discordjs/opus') as typeof import('@discordjs/opus');
 
 export interface Decoder { decode(packet: Buffer): Buffer; delete(): void }
 export const createDecoder = (): Decoder => {
-  let native: Opus.OpusEncoder | undefined = new Opus.OpusEncoder(SAMPLE_RATE, CHANNELS);
+  let native: OpusEncoder | undefined = new Opus.OpusEncoder(SAMPLE_RATE, CHANNELS);
   return {
     decode(packet) {
       if (!native) throw new Error('デコーダーは終了済みです。');

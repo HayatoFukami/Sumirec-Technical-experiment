@@ -51,6 +51,8 @@ describe('時刻と音声ファイル', () => {
         expect(decoded.some((byte) => byte !== 0)).toBe(true);
       }
     } finally { decoder.delete(); }
+    decoder.delete(); // 終了を重複実行してもnative参照を再利用しない。
+    expect(() => decoder.decode(Buffer.from([0xf8, 0xff, 0xfe]))).toThrow('終了済み');
   });
   it('実Opusから参加者WAV・時刻情報・混合音声まで生成する', async () => {
     const cfg = await config(); const f = fixture([A]); f.options.decoderFactory = createDecoder;
