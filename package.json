@@ -18,7 +18,8 @@
     "recover-silence": "tsx --env-file-if-exists=.env src/recover-silence-cli.ts",
     "recover-vad": "tsx --env-file-if-exists=.env src/recover-vad-cli.ts",
     "test:vad": "vitest run tests/vad-model.test.ts",
-    "test:vad:speech": "tsx --env-file-if-exists=.env tests/vad-speech-evaluation.ts"
+    "test:vad:speech": "tsx --env-file-if-exists=.env tests/vad-speech-evaluation.ts",
+    "transcribe": "tsx --env-file-if-exists=.env src/transcribe-cli.ts"
   },
   "dependencies": {
     "@discordjs/opus": "0.10.0",
