@@ -1,9 +1,12 @@
-import Opus = require('@discordjs/opus');
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { CHANNELS, FRAME_BYTES, SAMPLE_RATE, type Metadata, type Segment, Timeline, type UserMetrics } from './model.js';
 import { privateDirectory, snowflake, WavWriter } from './storage.js';
 import type { RecordingConfig } from './config.js';
 import { errorCategory, type DiagnosticEvent } from './diagnostics.js';
+
+const require = createRequire(import.meta.url);
+const Opus = require('@discordjs/opus') as typeof import('@discordjs/opus');
 
 export interface Decoder { decode(packet: Buffer): Buffer; delete(): void }
 export const createDecoder = (): Decoder => {
