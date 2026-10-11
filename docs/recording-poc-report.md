@@ -279,7 +279,7 @@ READMEと `.env.example` に7項目を追加しました。既定値は `VAD_ENA
 
 同一セッションの同時実行はプロセス内ガード＋ `.vad.lock` のO_EXCLで拒否します。SIGKILL等でロックが残ったら、管理者がBot/CLIの停止を確認して `.vad.lock`だけを解除し、`pnpm recover-vad <guildId> <sessionId>` を実行します。復旧は保存済みpendingのみ、再推論や過去録音の新規分類は行いません。2つの名前があれば同一性を照合し、先だけなら内容を照合して参照を更新します。旧 `silenceCleanup`を変更・自動復旧しません。旧 `recover-silence`は存在する予定WAVを削除するため、その挙動をREADMEへ明記しました。
 
-管理者専有の0700保存先・信頼できる親ディレクトリ・他者が保存先を差し替えないことを前提にします。NodeのパスベースAPIだけで、特権を持つ別プロセスによる同時ディレクトリ差し替えを完全防御するものではありません。hard link・ディレクトリsyncに対応する同一ローカルファイルシステムを使用します。実電源断・保存媒体障害は未検証で、音声やmetadata自体の損失は復元できません。VAD記録保存前の強制終了から自動分類を再開する機能や、録音partialの修復はありません。
+管理者専有の0700保存先・信頼できる親ディレクトリ・他者が保存先を差し替えないことを前提にします。NodeのパスベースAPIだけで、特権を持つ別プロセスによる同時ディレクトリ差し替えを完全防御するものではありません。hard linkに対応する同一ローカルファイルシステムを使用し、POSIXではディレクトリsyncも必要です。WindowsのACL・ディレクトリ同期の制約は第14節を参照してください。実電源断・保存媒体障害は未検証で、音声やmetadata自体の損失は復元できません。VAD記録保存前の強制終了から自動分類を再開する機能や、録音partialの修復はありません。
 
 ### 自動検証結果
 
@@ -323,3 +323,35 @@ G1〜G8・G10はローカルの実モデルと自動検証で達成。G9は既�
 READMEのT1〜T13を開発チームの許可ギルドで実施してください。特に2人/3人同時発言、途中参加・再参加・再接続、複数ギルド、5〜15分の録音で、公開停止通知・3分類件数・各ファイルの聴取・SHA-256・保存統計・時刻・mixを照合します。同じ会議の原音を保持して設定別の誤判定を読み取り専用評価で比較し、短い声・小声・環境音のラベルと測定値を記録してください。保存媒体の実障害と多数ギルド停止時の待機・CPU/メモリも残課題です。
 
 将来のSTTでは分類結果を参考にしつつ原音への参照・ユーザーID・元のセグメント位置を維持し、VADの相対区間を会議位置へ加算できます。non-speechの自動破棄は設計していません。外部送信の同意・保持方針・リトライ等は第9節のとおり別途必要で、STT APIは今回追加していません。
+
+## 14. Windowsの録音準備失敗・Opusの型参照修正（2026-10-11）
+
+### 原因と修正
+
+ユーザーのWindows PowerShellログに `src/capture.ts:13 TS2503: Cannot find namespace 'Opus'` があり、ローカルの `pnpm typecheck` でも再現しました。直前のESM対応で `createRequire` の返り値を `Opus` という値へ代入した後、`Opus.OpusEncoder` を型の名前空間として参照したのが原因です。配布済み0.10.0の型定義を確認し、`import type { OpusEncoder }` に分離しました。実行時のCommonJS読込は維持し、可変長実Opusテストに終了後のデコード拒否・連続終了も追加しました。`pnpm start` は `dist/` を直接実行するため、ビルド失敗後の `bot_ready` は最新ソースのビルド成功の証拠ではありません。
+
+「録音準備に失敗しました」の処理経路には、公開準備通知・音声接続より前の `atomicJson → syncDirectory` がありました。従来は全OSでディレクトリを `O_RDONLY | O_DIRECTORY | O_NOFOLLOW` で開き、syncしていました。[Node.jsのファイルフラグ仕様](https://nodejs.org/api/fs.html#file-system-flags)ではWindowsに `O_DIRECTORY` / `O_NOFOLLOW` は提供されません。[libuvのWindows実装](https://github.com/libuv/libuv/blob/v1.x/src/win/fs.c)のfsyncは `FlushFileBuffers` を使い、[MicrosoftのAPI要件](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)ではhandleに書き込み権限が必要です。読み取り専用ディレクトリのsyncはこの要件を満たせず、初回メタデータ保存を失敗させます。提示ログに内部エラーがないため、ユーザーの実環境で同じ原因だったことは未確認ですが、開始前に失敗するWindows非対応の実装を特定・修正しました。
+
+`src/storage.ts` はWindowsでディレクトリの実在・通常ディレクトリ・symlinkでないことを検査してからディレクトリsyncだけを省きます。ファイル自身のsync、rename、WAV確定、VAD分類・移動、混合生成と、それらのエラー検出は維持します。POSIXのディレクトリsync失敗は従来どおり伝播します。`src/session.ts` は準備失敗を `storage_directory_error` / `metadata_write_error` / `start_notification_error` に分け、返信とメタデータへ固定コードを残します。外部例外本文やパスを公開しません。録音方式・ユーザー紐付け・時刻推定・DAVEは変更していません。
+
+### 検証結果
+
+環境はmacOS arm64、Node.js 24.19.0、pnpm 11.22.0。依存・ロックファイルの変更なし（Opus 0.10.0、voice 0.19.2、discord.js 14.27.0、TypeScript 7.0.2）。
+
+| 実行・確認 | 結果 |
+|---|---|
+| `pnpm typecheck` | 成功：ソース・テストstrict |
+| `pnpm test` | 成功：8ファイル・124テスト |
+| `pnpm build` | 成功 |
+| ビルド済み `dist/capture.js` の実Opusデコード | 成功：48kHz・2ch・20msから3,840 bytesのPCMを取得 |
+| Windows分岐＋ディレクトリsync失敗の模擬 | 開始、個別WAVヘッダー・長さ、VAD無効時の分類移動、mix、終了済みmetadata保存まで成功 |
+| Windows分岐でファイルopen / sync / renameの障害 | 準備失敗・原因コード・音声接続前の停止を確認。秘密の例外本文を保存しない |
+| 保存先が通常ファイル、存在しない同期先、symlink/junction | 拒否を確認。保存ディレクトリ作成と通知の失敗を区別 |
+| POSIXのディレクトリsync障害 | エラー伝播とhandle解放を確認 |
+| 実Windows・実Discord録音 | 未実施：今回の実行環境はmacOSで、テスト参加者を伴う実接続を行っていない |
+
+### 制約と次の確認
+
+Windowsではディレクトリsyncを行わないため、電源断時のrename・link・unlinkの永続性を保証しません。ファイルsyncでこの制約を解消したとは扱いません。Windowsのアクセス制限には0700/0600のmodeではなく管理者が設定するACLを使います。このOS別制約を新規Windowsセッションの `limitations` にも記録します。実電源断・Windows NTFS上の分類移動と復旧は未検証です。
+
+Windows側で修正版を取得し、`pnpm build` 成功後にBotを再起動し、許可テストギルドで `/record start`・`status`・`stop` を確認してください。準備失敗が続く場合は返信の固定原因コードで保存・通知を切り分けます。T1〜T13に沿った同時発言・途中参加・同期・5〜15分の安定性も引き続き実環境で確認が必要です。STT接続への影響・新規機能追加はありません。

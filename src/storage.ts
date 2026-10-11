@@ -44,6 +44,14 @@ export async function atomicJson(directory: string, value: unknown): Promise<voi
   await syncDirectory(directory);
 }
 export async function syncDirectory(directory: string): Promise<void> {
+  if (process.platform === 'win32') {
+    // Node/libuvのWindows fsyncはFlushFileBuffersを使用するが、
+    // 読み取り専用ディレクトリのhandleには適用できない。
+    // ファイル自体のsyncとrenameは呼び出し側で継続する。
+    const info = await lstat(directory);
+    if (info.isSymbolicLink() || !info.isDirectory()) throw new Error('保存先が安全なディレクトリではありません。');
+    return;
+  }
   const handle = await open(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try { await handle.sync(); }
   finally { await handle.close(); }

@@ -177,6 +177,7 @@ describe('開発チームのテスト録音セッション', () => {
     const manager = new SessionManager(await config());
     await expect(manager.start(g.options)).rejects.toThrow('準備');
     expect(manager.get(g.options.guildId)?.metadata.state).toBe('failed');
+    expect(manager.get(g.options.guildId)?.metadata.errorCode).toBe('start_notification_error');
     expect(g.voice.closes).toBe(1);
     const h = fixture([A]);
     h.options.notify = async (message) => { if (message.startsWith('録音開始')) throw new Error('test'); };

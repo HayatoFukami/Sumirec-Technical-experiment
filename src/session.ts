@@ -58,6 +58,7 @@ export class RecordingSession {
         'ジッター、順序逆転、欠落、最初のパケットの境界誤差、80ms以内の時間誤差を完全には復元できません。',
         '発話時間は保存PCMの長さです。VADによる実発話時間ではなく、マイク回り込みや通常の無音PCMも含み得ます。',
         'DAVE復号失敗の診断は0.19.2のdebug通知の集計です。ユーザー別の正確な復号失敗数・パケットロス率は算出しません。',
+        ...(process.platform === 'win32' ? ['Windowsではファイルをsyncしますが、ディレクトリをsyncできないため、電源断時のrename・link・unlinkの永続性は保証しません。保存先は管理者がWindows ACLで専有してください。'] : []),
       ],
       ...(config.diagnostics ? { diagnostics: { events: [], droppedEvents: 0 } } : {}),
     };
@@ -93,10 +94,13 @@ export class RecordingSession {
     if (this.metadata.diagnostics) this.metadata.diagnostics.receiver = this.options.voice.diagnostics?.();
   }
   async initialize(): Promise<void> {
+    let failureCode = 'storage_directory_error';
     try {
       this.directory = await privateDirectory(this.config.root, [this.metadata.guildId, this.metadata.sessionId]);
+      failureCode = 'metadata_write_error';
       await atomicJson(this.directory, this.metadata);
       if (!this.live()) return;
+      failureCode = 'start_notification_error';
       await this.options.notify(`録音準備：<#${this.metadata.channelId}> の参加者別音声とユーザーID・時刻をローカルに保存し、録音技術を検証します。開発チーム用のテスト録音のため、同意操作なしで開始し、途中参加・再参加者も自動で録音対象にします。停止は /record stop。保存済みデータの削除はBot管理者へ依頼してください。`);
       if (!this.live()) return;
       this.initialized = true;
@@ -105,7 +109,11 @@ export class RecordingSession {
       this.checkpointTimer = setInterval(() => { void this.enqueue(async () => { if (this.directory && this.live()) { this.metadata.durationMs = this.timeline?.offset() ?? 0; this.snapshotDiagnostics(); await atomicJson(this.directory, this.metadata); } }); }, 5000);
       this.checkpointTimer.unref();
       await this.reconcile();
-    } catch { await this.stop('initialization_error'); throw new Error('録音準備に失敗しました。保存先・通知権限を確認してください。'); }
+    } catch {
+      await this.stop(failureCode);
+      const hint = failureCode === 'start_notification_error' ? 'VCのテキストチャットへの通知権限を確認してください。' : '保存先のパス・書き込み権限・空き容量を確認してください。';
+      throw new Error(`録音準備に失敗しました（${failureCode}）。${hint}`);
+    }
   }
   private enqueue(task: () => Promise<void>): Promise<void> {
     this.queue = this.queue.then(task).catch(() => { void this.stop('session_operation_error'); });
