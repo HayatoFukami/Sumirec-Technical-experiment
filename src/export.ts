@@ -1,11 +1,11 @@
 import { constants } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import type { FileHandle } from 'node:fs/promises';
 import { CHANNELS, FRAME_BYTES, SAMPLE_RATE, type Segment } from './model.js';
 import { contained, privateDirectory, snowflake, WavWriter, wavHeader } from './storage.js';
 
-export interface ExportInput { durationMs: number; segments: Segment[]; silenceCleanup?: { entries: { state: string }[] } }
+export interface ExportInput { durationMs: number; segments: Segment[]; silenceCleanup?: { entries: { state: string }[] }; vad?: { moves: { state: string }[] } }
 export async function readFully(handle: FileHandle, size: number, position: number): Promise<Buffer> {
   const data = Buffer.alloc(size);
   let offset = 0;
@@ -18,12 +18,13 @@ export async function readFully(handle: FileHandle, size: number, position: numb
 }
 export async function segmentPath(directory: string, segment: Segment): Promise<string> {
   snowflake(segment.userId);
-  if (!new RegExp(`^users/${segment.userId}/segment-\\d{4,5}\\.wav$`).test(segment.file)) throw new Error('音声ファイル参照が不正です。');
-  for (const part of [directory, join(directory, 'users'), join(directory, 'users', segment.userId)]) {
+  if (!new RegExp(`^users/${segment.userId}/(?:(?:speech|non-speech|unclassified)/)?segment-\\d{4,5}\\.wav$`).test(segment.file)) throw new Error('音声ファイル参照が不正です。');
+  const path = contained(directory, segment.file);
+  for (const part of new Set([directory, dirname(directory), join(directory, 'users'), join(directory, 'users', segment.userId), dirname(path)])) {
     const stat = await lstat(part);
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('音声ディレクトリが不正です。');
   }
-  return contained(directory, segment.file);
+  return path;
 }
 export async function segmentHandle(directory: string, segment: Segment): Promise<FileHandle> {
   return open(await segmentPath(directory, segment), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -44,13 +45,14 @@ export async function inspectSegment(directory: string, segment: Segment): Promi
 
 // 1秒ごとのブロックで混合する。録音全体や全入力をメモリへ読み込まない。
 export async function exportMix(directory: string, input: ExportInput): Promise<{ file: string; bytes: number; gain: number; clippedSamples: number }> {
+  if (input.vad?.moves.some((entry) => entry.state === 'pending')) throw new Error('VAD移動の復旧が必要です。');
   if (input.silenceCleanup?.entries.some((entry) => entry.state === 'pending')) throw new Error('無音削除の復旧が必要です。');
   if (!Number.isFinite(input.durationMs) || input.durationMs < 0 || input.durationMs > 3_601_000 ||
     !Array.isArray(input.segments) || input.segments.length > 10_000) throw new Error('混合出力の上限を超えています。');
   const segments = input.segments.filter((s) => s.complete);
   for (const segment of segments) {
     if (!Number.isFinite(segment.startOffsetMs) || segment.startOffsetMs < 0 ||
-      !Number.isSafeInteger(segment.samples) || segment.samples < 1 ||
+      !Number.isSafeInteger(segment.samples) || segment.samples < 0 ||
       !Number.isFinite(segment.endOffsetMs) ||
       Math.abs(segment.endOffsetMs - segment.startOffsetMs - segment.samples / SAMPLE_RATE * 1000) > 0.01 ||
       segment.endOffsetMs > 3_601_000) throw new Error('セグメント時刻・長さが不正です。');

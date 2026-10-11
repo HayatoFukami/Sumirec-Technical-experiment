@@ -3,6 +3,15 @@ export const SAMPLE_RATE = 48_000;
 export const CHANNELS = 2;
 export const FRAME_BYTES = CHANNELS * 2;
 export type SessionState = 'preparing' | 'paused' | 'recording' | 'stopping' | 'completed' | 'failed';
+export type VadClass = 'speech' | 'non-speech' | 'unclassified';
+export interface SpeechRange { startMs: number; endMs: number }
+export interface VadResult {
+  classification: VadClass;
+  completed: boolean;
+  ranges: SpeechRange[];
+  error?: 'disabled' | 'incomplete' | 'wav_read_error' | 'model_load_error' | 'inference_error' | 'timeout' | 'move_error' | 'metadata_write_error' | 'classification_error';
+  sha256?: string;
+}
 
 export interface Segment {
   userId: string;
@@ -19,6 +28,7 @@ export interface Segment {
   packets: number;
   complete: boolean;
   timing: 'arrival-estimate';
+  vad?: VadResult;
 }
 export interface UserMetrics {
   packets: number;
@@ -57,6 +67,25 @@ export interface Metadata {
   exportError: string | null;
   limitations: string[];
   diagnostics?: RecordingDiagnostics;
+  vad?: {
+    version: 1;
+    model: string;
+    modelSha256: string;
+    runtime: string;
+    config: import('./config.js').VadConfig;
+    state: 'processing' | 'completed' | 'failed';
+    error?: 'metadata_write_error' | 'classification_error';
+    speechFiles: number;
+    nonSpeechFiles: number;
+    unclassifiedFiles: number;
+    errors: number;
+    moves: {
+      from: string; to: string; userId: string; sha256: string;
+      dev: number; ino: number; size: number;
+      result: VadResult;
+      state: 'pending' | 'moved';
+    }[];
+  };
   silenceCleanup?: {
     version: 1;
     entries: {

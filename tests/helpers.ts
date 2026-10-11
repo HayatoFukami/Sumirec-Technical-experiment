@@ -17,7 +17,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root,
 export async function config() {
   const root = await mkdtemp(join(tmpdir(), 'discord-poc-'));
   roots.push(root);
-  return { ...recordingConfig({}), root };
+  return { ...recordingConfig({ VAD_ENABLED: 'false' }), root };
 }
 export class TestClock implements Clock {
   now = 0;

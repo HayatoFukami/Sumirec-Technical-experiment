@@ -48,7 +48,7 @@ async function load(directory: string): Promise<Metadata> {
 }
 async function absent(path: string) { await expect(fs.lstat(path)).rejects.toMatchObject({ code: 'ENOENT' }); }
 
-describe('PCM完全ゼロのみを検査・削除する', () => {
+describe('旧形式互換：PCM完全ゼロのみを検査・削除する', () => {
   it.each([0, 960 * 4, 256 * 1024 + 4])('正常なゼロPCM %i バイトを削除する', async (bytes) => {
     const { directory, metadata } = await storedSession();
     const segment = await addWav(directory, metadata, Buffer.alloc(bytes));
@@ -188,55 +188,9 @@ describe('PCM完全ゼロのみを検査・削除する', () => {
 });
 
 describe('終了処理、保存統計、混合音声、復旧', () => {
-  it('複数ユーザーと同一ユーザーの無音・有音混在を整理し、元の時刻に混合する', async () => {
-    const f = fixture();
-    f.options.decoderFactory = () => ({ decode: (packet) => {
-      const pcm = Buffer.alloc(3840); if (packet[0]) pcm.writeInt16LE(packet[0]!); return pcm;
-    }, delete() {} });
-    const session = await new SessionManager(await config()).start(f.options);
-    f.clock.now = 100; f.voice.callbacks!.packet(A, Buffer.from([0])); f.voice.callbacks!.packet(B, Buffer.from([0]));
-    f.clock.now = 1000; f.voice.callbacks!.packet(A, Buffer.from([1])); f.voice.callbacks!.packet(B, Buffer.from([2]));
-    f.clock.now = 1500; await session.stop();
-    const metadata = await load(session.directory!);
-    expect(metadata.state).toBe('completed'); expect(metadata.savedFiles).toBe(2); expect(metadata.savedBytes).toBe(7768);
-    expect(metadata.silenceCleanup).toMatchObject({ deletedSegments: 2, deletedBytes: 7768 });
-    expect(metadata.segments.map((s) => s.startOffsetMs)).toEqual([980, 980]);
-    expect(metadata.segments.map((s) => s.endOffsetMs)).toEqual([1000, 1000]);
-    expect(metadata.durationMs).toBe(1500);
-    for (const user of [A, B]) {
-      expect(metadata.users[user]).toMatchObject({ segments: 1, audioDurationMs: 20, savedSamples: 960, bytes: 3884, packets: 2, decodeSuccesses: 2 });
-      await absent(join(session.directory!, `users/${user}/segment-0001.wav`));
-      expect((await fs.lstat(join(session.directory!, `users/${user}/segment-0002.wav`))).isFile()).toBe(true);
-    }
-    const mix = await fs.readFile(join(session.directory!, 'exports/mix.wav'));
-    expect(mix.length).toBe(44 + 1500 * 192);
-    expect(mix.subarray(44, 44 + 980 * 192).every((byte) => byte === 0)).toBe(true);
-    expect(mix.readInt16LE(44 + 980 * 192)).toBe(2);
-    expect(mix.readInt16LE(44 + 1000 * 192)).toBe(0);
-    for (const segment of metadata.segments) expect((await fs.lstat(join(session.directory!, segment.file))).isFile()).toBe(true);
-  });
-  it('全セグメントが無音でも正常終了して会議長の混合WAVを生成する', async () => {
-    const f = fixture(); f.options.decoderFactory = () => ({ decode: () => Buffer.alloc(3840), delete() {} });
-    const session = await new SessionManager(await config()).start(f.options);
-    f.clock.now = 100; f.voice.emit(A); f.voice.emit(B);
-    f.clock.now = 200; const stop = session.stop(); expect(session.stop()).toBe(stop); await stop;
-    expect(session.metadata.state).toBe('completed'); expect(session.metadata.segments).toEqual([]);
-    expect(session.metadata.savedFiles).toBe(0); expect(session.metadata.savedBytes).toBe(0);
-    expect(session.metadata.exportFile).toBe('exports/mix.wav');
-    const mix = await fs.readFile(join(session.directory!, 'exports/mix.wav'));
-    expect(mix.length).toBe(38444); expect(mix.subarray(44).every((byte) => byte === 0)).toBe(true);
-    expect(session.metadata.silenceCleanup?.deletedSegments).toBe(2);
-  });
-  it('一方のギルドの無音削除が別ギルドの音声と状態に影響しない', async () => {
-    const manager = new SessionManager(await config()); const f = fixture([A]); const g = fixture([B]);
-    f.options.decoderFactory = () => ({ decode: () => Buffer.alloc(3840), delete() {} }); g.options.guildId = C;
-    const [s, t] = await Promise.all([manager.start(f.options), manager.start(g.options)]);
-    f.clock.now = 100; g.clock.now = 100; f.voice.emit(A); g.voice.emit(B);
-    await s.stop(); expect(t.metadata.state).toBe('recording'); await t.stop();
-    expect(s.metadata.savedFiles).toBe(0); expect(t.metadata.savedFiles).toBe(1);
-    expect(t.metadata.silenceCleanup?.deletedSegments).toBe(0);
-    expect((await fs.lstat(join(t.directory!, t.metadata.segments[0]!.file))).isFile()).toBe(true);
-  });
+
+
+
   it('実Opusデコードで生じた非ゼロPCMをWAV生成後も保持する', async () => {
     const { directory, metadata } = await storedSession();
     const encoder = new Opus.OpusEncoder(48000, 2); const decoder = createDecoder();
@@ -325,43 +279,8 @@ describe('終了処理、保存統計、混合音声、復旧', () => {
     expect(metadata.savedFiles).toBe(1); expect(metadata.segments).toEqual([segment]);
     expect((await fs.readFile(join(directory, segment.file))).readInt16LE(44)).toBe(1);
   });
-  it('セッションの削除失敗を通知し、混合を開始せず復旧可能な記録を保存する', async () => {
-    const f = fixture([A]); f.options.decoderFactory = () => ({ decode: () => Buffer.alloc(3840), delete() {} });
-    const session = await new SessionManager(await config()).start(f.options);
-    f.clock.now = 100; f.voice.emit(A);
-    vi.spyOn(fs, 'unlink').mockRejectedValueOnce(new Error('denied'));
-    await session.stop();
-    expect(session.metadata.state).toBe('failed'); expect(session.active).toBe(false);
-    expect(session.metadata.errorCode).toBe('silence_cleanup_error');
-    expect(session.metadata.exportFile).toBeNull(); expect(session.metadata.exportError).toBe('silence_cleanup_pending');
-    expect(f.notices.at(-1)).toContain('混合出力に失敗');
-    const persisted = await load(session.directory!);
-    expect(persisted.silenceCleanup?.entries[0]).toMatchObject({ state: 'pending', error: 'delete_failed' });
-    await cleanupSilentSegments(session.directory!, persisted, true);
-    expect(persisted.savedFiles).toBe(0);
-  });
-  it('セッションの削除後保存失敗を成功扱いせず、最終保存で参照の不整合を解消する', async () => {
-    const f = fixture([A]); f.options.decoderFactory = () => ({ decode: () => Buffer.alloc(3840), delete() {} });
-    const session = await new SessionManager(await config()).start(f.options);
-    f.clock.now = 100; f.voice.emit(A);
-    const realSave = storage.atomicJson;
-    let failed = false;
-    vi.spyOn(storage, 'atomicJson').mockImplementation(async (directory, value) => {
-      const metadata = value as Metadata;
-      if (!failed && metadata.state === 'stopping' && metadata.silenceCleanup?.deletedSegments === 1) {
-        failed = true; throw new Error('save failed after unlink');
-      }
-      await realSave(directory, value);
-    });
-    await session.stop();
-    expect(failed).toBe(true); expect(session.metadata.state).toBe('failed');
-    expect(session.metadata.errorCode).toBe('silence_cleanup_error'); expect(session.metadata.exportFile).toBeNull();
-    const persisted = await load(session.directory!);
-    expect(persisted.segments).toEqual([]); expect(persisted.savedFiles).toBe(0);
-    expect(persisted.silenceCleanup?.deletedSegments).toBe(1);
-    await cleanupSilentSegments(session.directory!, persisted, true);
-    expect(persisted.savedBytes).toBe(0);
-  });
+
+
   it('同じセッションへの並行削除を拒否し、統計を二重更新しない', async () => {
     const { directory, metadata } = await storedSession();
     await addWav(directory, metadata, Buffer.alloc(3840));

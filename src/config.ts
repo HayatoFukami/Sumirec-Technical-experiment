@@ -1,5 +1,35 @@
 import { resolve } from 'node:path';
 
+export interface VadConfig {
+  enabled: boolean;
+  positiveThreshold: number;
+  negativeThreshold: number;
+  minSpeechMs: number;
+  redemptionMs: number;
+  preSpeechPadMs: number;
+  maxConcurrency: number;
+}
+export function vadConfig(env: NodeJS.ProcessEnv = process.env): VadConfig {
+  if (env.VAD_ENABLED !== undefined && !['true', 'false'].includes(env.VAD_ENABLED)) throw new Error('VAD_ENABLEDはtrueまたはfalseで指定してください。');
+  const number = (key: string, fallback: number, max: number, integer = false) => {
+    const raw = env[key];
+    const value = raw === undefined ? fallback : Number(raw);
+    if (raw?.trim() === '' || !Number.isFinite(value) || value < 0 || value > max || (integer && !Number.isSafeInteger(value))) throw new Error(`${key}の設定が不正です。`);
+    return value;
+  };
+  const config = {
+    enabled: env.VAD_ENABLED !== 'false',
+    positiveThreshold: number('VAD_POSITIVE_THRESHOLD', 0.40, 1),
+    negativeThreshold: number('VAD_NEGATIVE_THRESHOLD', 0.30, 1),
+    minSpeechMs: number('VAD_MIN_SPEECH_MS', 100, 60_000, true),
+    redemptionMs: number('VAD_REDEMPTION_MS', 200, 60_000, true),
+    preSpeechPadMs: number('VAD_PRE_SPEECH_PAD_MS', 100, 60_000, true),
+    maxConcurrency: number('VAD_MAX_CONCURRENCY', 1, 4, true),
+  };
+  if (config.negativeThreshold >= config.positiveThreshold) throw new Error('VAD_NEGATIVE_THRESHOLDはVAD_POSITIVE_THRESHOLDより小さくしてください。');
+  if (config.maxConcurrency < 1) throw new Error('VAD_MAX_CONCURRENCYは1〜4の整数で指定してください。');
+  return config;
+}
 export interface RecordingConfig {
   root: string;
   maxDurationMs: number;
@@ -9,6 +39,7 @@ export interface RecordingConfig {
   reconnectTimeoutMs: number;
   segmentGapMs: number;
   diagnostics?: boolean;
+  vad?: VadConfig;
 }
 function integer(env: NodeJS.ProcessEnv, key: string, fallback: number, max: number): number {
   const value = Number(env[key] ?? fallback);
@@ -18,6 +49,7 @@ function integer(env: NodeJS.ProcessEnv, key: string, fallback: number, max: num
 export function recordingConfig(env: NodeJS.ProcessEnv = process.env): RecordingConfig {
   if (env.RECORDING_DIAGNOSTICS !== undefined && !['true', 'false'].includes(env.RECORDING_DIAGNOSTICS)) throw new Error('RECORDING_DIAGNOSTICSはtrueまたはfalseで指定してください。');
   return {
+    vad: vadConfig(env),
     diagnostics: env.RECORDING_DIAGNOSTICS === 'true',
     root: resolve(env.RECORDINGS_DIR ?? './recordings'),
     maxDurationMs: integer(env, 'MAX_DURATION_MS', 900_000, 3_600_000),

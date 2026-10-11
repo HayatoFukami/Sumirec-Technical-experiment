@@ -15,12 +15,16 @@
     "test": "vitest run",
     "build": "tsc",
     "export": "tsx --env-file-if-exists=.env src/export-cli.ts",
-    "recover-silence": "tsx --env-file-if-exists=.env src/recover-silence-cli.ts"
+    "recover-silence": "tsx --env-file-if-exists=.env src/recover-silence-cli.ts",
+    "recover-vad": "tsx --env-file-if-exists=.env src/recover-vad-cli.ts",
+    "test:vad": "vitest run tests/vad-model.test.ts",
+    "test:vad:speech": "tsx --env-file-if-exists=.env tests/vad-speech-evaluation.ts"
   },
   "dependencies": {
     "@discordjs/opus": "0.10.0",
     "@discordjs/voice": "0.19.2",
-    "discord.js": "14.27.0"
+    "discord.js": "14.27.0",
+    "onnxruntime-node": "1.30.0"
   },
   "devDependencies": {
     "@types/node": "26.6.4",
