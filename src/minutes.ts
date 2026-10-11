@@ -72,14 +72,14 @@ export function validateMinutes(value: unknown, utterances: Utterance[]): Minute
       const selfMention = ['私','自分','僕','俺'].includes(owner.mention);
       if (!(idMention || selfMention) || !owner.evidence.some(e => e.quote.includes(owner.mention!) &&
         (idMention || byId.get(e.utteranceId)?.userId === owner.userId) && /(担当します|対応します|引き受けます|実施します|やります|担当は)/.test(e.quote) &&
-        !/(しません|しない|未定|どう|なら|場合|かもしれ)/.test(e.quote))) throw new ApiError('grounding_error');
+        !/(しません|しない|未定|どう|なら|場合|かもしれ|か\s*[。？?]|でしょう|と思い|という発言|と言[ういっ])/.test(e.quote))) throw new ApiError('grounding_error');
     }
     const due = action.deadline;
     if (due.text === null) { if (due.evidence.length) throw new ApiError('grounding_error'); }
     else {
       checkEvidence(due.evidence);
       if (!due.text.trim() || !/(日|月|年|週|時|期限|まで|明日|今日)/.test(due.text) || !due.evidence.some(e => e.quote.includes(due.text!) &&
-        /(まで|期限|締切)/.test(e.quote) && !/(未定|未決|しません|ではない|ではありません|かもしれ|なら|場合)/.test(e.quote))) throw new ApiError('grounding_error');
+        /(まで|期限|締切)/.test(e.quote) && !/(未定|未決|しません|ではない|ではありません|かもしれ|なら|場合|か\s*[。？?]|でしょう|と思い)/.test(e.quote))) throw new ApiError('grounding_error');
     }
     const refs = new Set(action.evidence.map(e => e.utteranceId));
     if ([...owner.evidence, ...due.evidence].some(e => !refs.has(e.utteranceId))) throw new ApiError('grounding_error');

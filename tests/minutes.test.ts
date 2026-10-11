@@ -61,6 +61,14 @@ describe('議事録の構造・原文根拠', () => {
       expect(() => validateMinutes(content,[u])).toThrow('grounding_error');
     }
   });
+  it('担当・期限を問う発言を割当や確定期限として採用しない', async () => {
+    const f = await transcriptFixture();
+    for (const speech of ['私がテストを担当しますか？期限は10月20日までです。','私がテストを担当します。期限は10月20日までですか？']) {
+      const u = {...f.u,text:speech}; const content = groundedContent(u); const evidence=[{utteranceId:u.id,quote:speech}];
+      content.actions=[{text:speech,evidence,assignee:{userId:A,mention:'私',evidence},deadline:{text:'10月20日まで',evidence}}];
+      expect(() => validateMinutes(content,[u])).toThrow('grounding_error');
+    }
+  });
   it('JSON Schemaの追加キー・型・null・空の根拠を検査する', async () => {
     const f = await transcriptFixture();
     for (const bad of [{...f.content,unexpected:'x'},{...f.content,decisions:{}},{...f.content,overview:null},{...f.content,overview:{text:'概要',evidence:[]}}]) expect(() => validateMinutes(bad,[f.u])).toThrow();
