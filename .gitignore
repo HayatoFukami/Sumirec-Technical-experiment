@@ -5,6 +5,9 @@ coverage/
 .env.*
 !.env.example
 recordings/
+transcripts/
+minutes/
+.processing.lock
 *.wav
 *.pcm
 *.opus
