@@ -1,6 +1,6 @@
 # Discord会議録音PoC
 
-Discordの通常のボイスチャンネルから、開発チームの参加者の音声をユーザー別に録音する技術検証用Botです。参加者別WAV、発話セグメントの推定時刻、検証用混合WAVをローカルに保存します。停止後の手動CLIでMAI-Transcribe-2の文字起こし、時系列統合、根拠参照付きAI議事録を生成するPoCも実装しています。外部送信は初期設定で無効です。実Azure/OpenAI APIの通信・品質は未検証です。
+Discordの通常のボイスチャンネルから、開発チームの参加者の音声をユーザー別に録音する技術検証用Botです。参加者別WAV、発話セグメントの推定時刻、検証用混合WAVをローカルに保存します。停止後の手動CLIでMAI-Transcribe-2の文字起こし、時系列統合、根拠参照付きAI議事録を生成するPoCも実装しています。外部送信は初期設定で無効です。既存の開発チーム録音からAzure実APIで3人分・20発言を取得しました。認識精度は未評価、OpenAI実通信と議事録品質は未検証です。
 
 **今回の修正後の実Discordでの接続・録音は未検証です。** 自動テスト、実Opusのデコード、WAV形式、無音・重なりの復元は検証済みです。複数人録音の不具合調査と既存データの検査結果は [検証レポート](docs/recording-poc-report.md#11-複数ユーザー録音の不具合調査2026-10-10) を参照してください。
 
@@ -295,7 +295,7 @@ pnpm minutes <guildId> <sessionId>
 
 有効化フラグがfalseなら、`--dry-run`なしでも通信せず計画だけ表示します。dry-runはAPIキー不要で、音声形式・パス・ハッシュも確認します。成果物は生成せず、一時的な排他ロックだけを使用します。資格情報・上限・保存先に問題がある場合、実行は固定の原因コードで失敗します。一部STT失敗も終了コード1とし、成功分と失敗状態は保存します。空文字は`needs_review / empty_transcript`として記録し、無発話と断定しません。LLM入力が空なら議事録を生成しません。
 
-Azureは[MAI公式仕様](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/mai-transcribe)と[REST API仕様](https://learn.microsoft.com/en-us/rest/api/speechtotext/transcriptions/transcribe?view=rest-speechtotext-2025-10-15)に従い、`POST /speechtotext/transcriptions:transcribe?api-version=2025-10-15`をmultipartで呼びます。`AZURE_SPEECH_ENDPOINT`は`https://<resource>.cognitiveservices.azure.com`等のリソースURLです。任意ホスト・非HTTPS・URLの鍵・リダイレクトは拒否します。MAI対応リージョンと権限は利用者側で確認してください。モデルは公開プレビューで、実レスポンスとの互換性はまだ実測していません。
+Azureは[MAI公式仕様](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/mai-transcribe)と[REST API仕様](https://learn.microsoft.com/en-us/rest/api/speechtotext/transcriptions/transcribe?view=rest-speechtotext-2025-10-15)に従い、`POST /speechtotext/transcriptions:transcribe?api-version=2025-10-15`をmultipartで呼びます。`AZURE_SPEECH_ENDPOINT`は`https://<resource>.cognitiveservices.azure.com`等のリソースURLです。任意ホスト・非HTTPS・URLの鍵・リダイレクトは拒否します。MAI対応リージョンと権限は利用者側で確認してください。モデルは公開プレビューです。日本語・segment設定の実応答は確認しましたが、他の設定・リージョン・言語は未検証です。
 
 `enhancedMode.enabled=true`、`model=MAI-Transcribe-2`、`transcribeStyle=verbatim`、`timestamps=segment`、`diarization.enabled=false`を既定とします。`STT_LANGUAGE=ja`は日本語固定、`auto`はlocalesを省略します。`STT_PHRASES_JSON='["Silero", "製品名"]'`で専門用語を登録できます。`STT_STYLE=clean`、`STT_TIMESTAMPS=word`も比較可能です。wordを指定しても、このPoCの統合発言単位はAPIのphraseです。
 
@@ -327,7 +327,7 @@ recordings/<guildId>/<sessionId>/
 │   ├── segments.json             # 最新実行の状態・チャンク別処理結果
 │   ├── merged.json / merged.md   # 時系列全文・状態・モデル・API利用量
 │   ├── users/<userId>.json       # ユーザー別文字起こし
-│   ├── cache/<hash>.json         # 成功したAPI結果・変換済み発言
+│   ├── cache/<hash>.json         # 成功結果と、再検査用の構造を読める失敗応答
 │   └── runs/<runId>.json         # 過去実行結果、設定比較用
 └── minutes/
     ├── minutes.json / minutes.md
@@ -339,6 +339,8 @@ recordings/<guildId>/<sessionId>/
 音声ハッシュ、ギルド/セッション、元時刻の対応表、モデル、言語、style、timestamps、専門用語、分類選択、チャンク設定を照合して成功キャッシュを利用します。読み出し時は保存したAPI結果を再検査して時刻対応を再計算します。設定を戻せば以前のキャッシュを利用できます。LLMは全文・モデル・出力上限・スキーマ・指示文のハッシュを使用します。資格情報はハッシュの入力や成果物に含めません。
 
 同じ設定で比較し直す場合だけ`--force`を使います。再送信・追加課金が発生し得ます。force失敗は前回成功キャッシュを消しません。成功済みSTTはチャンクごとに保存し、部分失敗時も再利用できます。最新の文字起こし途中で以前の`merged.json`が残った場合、議事録CLIは実行IDと完了状態の不一致で停止します。LLM失敗時は前回の議事録を保持するため、**採用前に必ずprocessing.jsonが今回の入力でcompletedになっていることを確認**してください。
+
+実Azure応答では総音声長と元WAV長に最大約2.65msの差を観測しました。`durationMilliseconds`の総長照合は10ms以内の差を許容し、差を`apiDurationDifferenceMs`に残します。発言の時刻配置・チャンク長は元WAVのサンプル数に基づき、APIの丸めに合わせて変更しません。発言範囲や元音声参照の検査は維持します。構造を読める形式不一致の応答はキャッシュへ保存し、修正版の検査を通れば追加通信せず回収します。dry-runではそのキャッシュを変更しません。原音照合による時刻精度の保証とは別です。
 
 `.processing.lock`で同じセッションのSTT/議事録CLIを排他します。VADロックや未解決の移動も拒否しますが、Botの全処理と共有する排他ではありません。クラッシュ後は他のCLI・Botが対象データを更新していないことを管理者が確認してから、対象セッションの`.processing.lock`だけを取り除き再実行します。音声・キャッシュを自動削除する復旧処理はありません。排他下でファイルsync・atomic renameを使い、ディレクトリは0700・成果物は0600で新規作成します。既存保存先は管理者専有を前提とします。
 
@@ -352,7 +354,7 @@ STTは1実行あたり最大100リクエスト、累計900音声秒、同時2件
 
 **検査だけで捏造や取り違えが完全に防げるとは保証しません。** 引用が正しくても文脈の誤解、提案と合意の誤判断、要約への根拠の弱い情報混入、STT自体の誤認識は残り得ます。保守的な表現チェックは正しい決定を拒否する場合もあります。`semanticAccuracy:requires_human_review`を残し、原音・全文・根拠引用を照合します。録音失敗、未分類/不完全音声、STT失敗・空結果は議事録に不完全と明記します。non-speech除外も警告として残します。
 
-### 実録音による評価手順（未実施）
+### 実録音による評価手順（認識精度・議事録品質の原音照合は未実施）
 
 1. 外部送信に同意済みのテスト参加者で、交互/同時発言、短い相づち、専門用語、提案だけの文、明示決定、担当/期限がある文とない文を録音します。予定表を用意し、既知の合図時刻・正解発言をローカルで管理します。
 2. 録音停止後に個別WAVを聴取し、VAD3分類・ユーザーID・元時刻を照合します。speechの見逃しだけでなくnon-speech/unclassifiedにある発話も確認します。
@@ -361,4 +363,4 @@ STTは1実行あたり最大100リクエスト、累計900音声秒、同時2件
 5. 議題網羅、決定と提案、アクション、担当、期限、創作情報について、各根拠IDの引用と原音を人間が照合します。失敗音声がある結果の不完全表示も確認します。
 6. 同設定の再実行で新規要求0を確認し、20秒/短いチャンク、segment/word、ja/auto、専門用語有無、対象分類変更を比較します。モデル・設定・runId・試行数・利用量・誤差をローカルに残し、匿名化した集計だけを検証レポートへ追記します。
 
-元録音と派生成果物は管理者が保存期間を決め、必要な場合にセッション全体を手動削除します。このCLIは自動削除・外部サービスの削除を行いません。APIキー、実音声、会議全文、実ユーザーIDを含むJSONはGitへ追加しないでください。G1〜G10と品質評価の現状は[検証レポート第15節](docs/recording-poc-report.md#15-文字起こしai議事録poc2026-10-12)を参照してください。
+元録音と派生成果物は管理者が保存期間を決め、必要な場合にセッション全体を手動削除します。このCLIは自動削除・外部サービスの削除を行いません。APIキー、実音声、会議全文、実ユーザーIDを含むJSONはGitへ追加しないでください。G1〜G10と品質評価の現状は[検証レポート第15節](docs/recording-poc-report.md#15-文字起こしai議事録poc2026-10-12)、既存録音の実API結果は[第16節](docs/recording-poc-report.md#16-既存discord録音のazure実api検証2026-10-12)を参照してください。
