@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { transcribeSession, planTranscription, mergeUtterances, parseAzureResult, azureDefinition } from '../src/transcribe.js';
 import { sttConfig, azureUrl } from '../src/processing-config.js';
 import { atomicJson, privateDirectory } from '../src/storage.js';
+import { writeArtifact } from '../src/processing-storage.js';
 import { A, B, C } from './helpers.js';
 import { recordingFixture, azureResponse } from './processing-helpers.js';
 
@@ -136,6 +137,36 @@ describe('キャッシュ・失敗・予算', () => {
   });
 });
 describe('レスポンス検査と設定', () => {
+  it('実APIの総長丸めを許容し、元サンプルの時刻を保つ。10ms超の差は拒否', async () => {
+    const f = await recordingFixture([{start:500.5,ms:86527/48}]); const plan = await planTranscription(f.directory,f.metadata,f.stt), chunk = plan.chunks[0]!;
+    const value = {durationMilliseconds:1800,combinedPhrases:[{text:'発言'}],phrases:[{text:'発言',offsetMilliseconds:0,durationMilliseconds:1802}]};
+    const parsed = parseAzureResult(value,chunk,f.stt.model);
+    expect(parsed.apiDurationDifferenceMs).toBeCloseTo(-2.6458333333);
+    expect(parsed.utterances[0]!.startOffsetMs).toBe(500.5); expect(parsed.utterances[0]!.endOffsetMs).toBe(2302.5);
+    expect(() => parseAzureResult({...value,durationMilliseconds:1840},chunk,f.stt.model)).toThrow('invalid_response');
+    expect(() => parseAzureResult({...value,phrases:[{text:'発言',offsetMilliseconds:0,durationMilliseconds:1900}]},chunk,f.stt.model)).toThrow('invalid_response');
+  });
+  it('保存した失敗応答を修正版で再検査し、APIを再送しない。dry-runではキャッシュを変更しない', async () => {
+    const f = await recordingFixture([{ms:86527/48}]); const plan = await planTranscription(f.directory,f.metadata,f.stt), chunk = plan.chunks[0]!;
+    const cache = await privateDirectory(f.directory,['transcripts','cache']);
+    const failed = {chunk,status:'failed',error:'invalid_response',utterances:[],processedAt:'2026-10-12T00:00:00Z',cached:false,
+      usage:{requests:1,retries:0,submittedAudioSeconds:chunk.samples/48000},response:{durationMilliseconds:1800,combinedPhrases:[{text:'発言'}],phrases:[{text:'発言',offsetMilliseconds:0,durationMilliseconds:1802}]}};
+    await writeArtifact(cache,`${chunk.id}.json`,failed); const before=await readFile(join(cache,`${chunk.id}.json`)); const send=vi.fn();
+    const dry=await transcribeSession(f.guild,f.session,f.stt,{dryRun:true},{fetch:send}); expect(dry.summary.cachedChunks).toBe(1); expect(await readFile(join(cache,`${chunk.id}.json`))).toEqual(before);
+    const result=await transcribeSession(f.guild,f.session,f.stt,{}, {fetch:send});
+    if (result.dryRun) throw new Error('expected execution');
+    expect(result.bundle.usage.requests).toBe(0); expect(result.bundle.chunks[0]).toMatchObject({status:'succeeded',responseReprocessed:true}); expect(send).not.toHaveBeenCalled();
+    const persisted=JSON.parse(await readFile(join(cache,`${chunk.id}.json`),'utf8')); expect(persisted.status).toBe('succeeded'); expect(persisted.error).toBeUndefined();
+  });
+  it('応答の形式不一致を保存し、再検査用の失敗応答で過去成功を上書きしない', async () => {
+    const f=await recordingFixture(); const malformed=vi.fn(async()=>new Response(JSON.stringify({durationMilliseconds:1200,combinedPhrases:[{text:'発言'}],phrases:[{text:'発言',offsetMilliseconds:0,durationMilliseconds:1000}]}))) as typeof fetch;
+    const first=await transcribeSession(f.guild,f.session,f.stt,{}, {fetch:malformed});
+    if(first.dryRun) throw new Error('expected execution');
+    const chunk=first.bundle.chunks[0]!; expect(chunk.status).toBe('failed'); expect(chunk.response!.durationMilliseconds).toBe(1200);
+    await transcribeSession(f.guild,f.session,f.stt,{}, {fetch:vi.fn(async()=>azureResponse()) as typeof fetch});
+    const cache=join(f.directory,'transcripts','cache',`${chunk.chunk.id}.json`); const before=await readFile(cache);
+    await transcribeSession(f.guild,f.session,f.stt,{force:true},{fetch:malformed}); expect(await readFile(cache)).toEqual(before);
+  });
   it('不正時刻・無音内だけの時刻を拒否し同一元発言の重複だけ排除', async () => {
     const f = await recordingFixture([{start:0},{start:1500}]); const plan = await planTranscription(f.directory,f.metadata,f.stt), chunk = plan.chunks[0]!;
     const data = (offset: number,duration: number) => ({durationMilliseconds:2500,combinedPhrases:[{text:'はい'}],phrases:[{text:'はい',offsetMilliseconds:offset,durationMilliseconds:duration}]});

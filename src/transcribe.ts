@@ -26,9 +26,10 @@ export interface Utterance {
 }
 export interface ChunkResult {
   chunk: AudioChunk; status: 'succeeded' | 'failed' | 'needs_review'; utterances: Utterance[];
-  error?: ApiErrorCode; httpStatus?: number; apiDurationMs?: number; combinedText?: string;
+  error?: ApiErrorCode; httpStatus?: number; apiDurationMs?: number; apiDurationDifferenceMs?: number; combinedText?: string;
   processedAt: string; usage: ApiStats; cached: boolean;
   response?: AzureTranscript;
+  responseReprocessed?: boolean;
 }
 export interface AzureTranscript {
   durationMilliseconds: number; combinedPhrases: { text: string }[];
@@ -110,13 +111,23 @@ export async function planTranscription(directory: string, metadata: Metadata, c
   return { schemaVersion: 1, guildId: metadata.guildId, sessionId: metadata.sessionId, recordingStartedAt: metadata.recordingStartedAt,
     recordingIncomplete: metadata.state === 'failed' || metadata.segments.some(s => !s.complete), settings: transcriptionSettings(config), chunks, sources };
 }
-export function parseAzureResult(value: unknown, chunk: AudioChunk, model: string): Pick<ChunkResult, 'utterances' | 'apiDurationMs' | 'combinedText'> {
+function azureTranscript(value: unknown): AzureTranscript {
   if (!record(value) || !Number.isFinite(value.durationMilliseconds) || Number(value.durationMilliseconds) < 0 ||
-    Math.abs(Number(value.durationMilliseconds) - chunk.samples / 48) > 2 || !Array.isArray(value.phrases) || value.phrases.length > 1000 || !Array.isArray(value.combinedPhrases) || value.combinedPhrases.length > 2 ||
+    !Array.isArray(value.phrases) || value.phrases.length > 1000 || !Array.isArray(value.combinedPhrases) || value.combinedPhrases.length > 2 ||
     !value.combinedPhrases.every(p => record(p) && typeof p.text === 'string' && p.text.length <= 100_000)) throw new ApiError('invalid_response');
-  const combinedText = value.combinedPhrases.map(p => String(p.text)).join('\n');
+  if (!value.phrases.every(p => record(p) && typeof p.text === 'string' && p.text.length <= 20_000 && Number.isFinite(p.offsetMilliseconds) && Number.isFinite(p.durationMilliseconds))) throw new ApiError('invalid_response');
+  const input = value as unknown as AzureTranscript;
+  return { durationMilliseconds: input.durationMilliseconds, combinedPhrases: input.combinedPhrases.map(p => ({text:p.text})),
+    phrases: input.phrases.map(p => ({text:p.text,offsetMilliseconds:p.offsetMilliseconds,durationMilliseconds:p.durationMilliseconds})) };
+}
+export function parseAzureResult(value: unknown, chunk: AudioChunk, model: string): Pick<ChunkResult, 'utterances' | 'apiDurationMs' | 'apiDurationDifferenceMs' | 'combinedText'> {
+  const response = azureTranscript(value);
+  // 実APIでWAV実長との差±約2.6msを観測。総長だけ10msまで許容し、時刻配置は元サンプルを使う。
+  const apiDurationDifferenceMs = response.durationMilliseconds - chunk.samples / 48;
+  if (Math.abs(apiDurationDifferenceMs) > 10) throw new ApiError('invalid_response');
+  const combinedText = response.combinedPhrases.map(p => p.text).join('\n');
   const utterances: Utterance[] = [];
-  for (const phrase of value.phrases) {
+  for (const phrase of response.phrases) {
     if (!record(phrase) || typeof phrase.text !== 'string' || phrase.text.length > 20_000 || !Number.isFinite(phrase.offsetMilliseconds) || !Number.isFinite(phrase.durationMilliseconds) ||
       Number(phrase.offsetMilliseconds) < 0 || Number(phrase.durationMilliseconds) <= 0 ||
       Number(phrase.offsetMilliseconds) + Number(phrase.durationMilliseconds) > chunk.samples / 48 + 1) throw new ApiError('invalid_response');
@@ -135,7 +146,7 @@ export function parseAzureResult(value: unknown, chunk: AudioChunk, model: strin
       text, sourceSegments, model, status: 'succeeded', chunkId: chunk.id });
   }
   if (!utterances.length || !combinedText.trim()) throw new ApiError('empty_transcript');
-  return { utterances, apiDurationMs: Number(value.durationMilliseconds), combinedText };
+  return { utterances, apiDurationMs: response.durationMilliseconds, apiDurationDifferenceMs, combinedText };
 }
 export function mergeUtterances(results: ChunkResult[]): Utterance[] {
   const seen = new Set<string>();
@@ -146,16 +157,22 @@ export function mergeUtterances(results: ChunkResult[]): Utterance[] {
     seen.add(key); return true;
   }).sort((a, b) => a.startOffsetMs - b.startOffsetMs || a.endOffsetMs - b.endOffsetMs || a.userId.localeCompare(b.userId) || a.id.localeCompare(b.id));
 }
-async function cachedResult(directory: string, chunk: AudioChunk, model: string): Promise<ChunkResult | undefined> {
+async function cachedResult(directory: string, chunk: AudioChunk, model: string, persistRecovery = false): Promise<ChunkResult | undefined> {
   let value: unknown;
   try { value = await readJson(directory, `${chunk.id}.json`); }
   catch (error) { if (record(error) && error.code === 'ENOENT') return undefined; throw error; }
-  if (!record(value) || value.status !== 'succeeded' || !record(value.chunk) || JSON.stringify(value.chunk) !== JSON.stringify(chunk)) return undefined;
+  if (!record(value) || !(value.status === 'succeeded' || (value.status === 'failed' && value.error === 'invalid_response')) || !record(value.chunk) || JSON.stringify(value.chunk) !== JSON.stringify(chunk)) return undefined;
+  let parsed: ReturnType<typeof parseAzureResult>;
   try {
-    const parsed = parseAzureResult(value.response, chunk, model);
-    if (JSON.stringify(parsed.utterances) !== JSON.stringify(value.utterances)) return undefined;
+    parsed = parseAzureResult(value.response, chunk, model);
+    if (value.status === 'succeeded' && JSON.stringify(parsed.utterances) !== JSON.stringify(value.utterances)) return undefined;
   } catch { return undefined; }
-  return { ...(value as unknown as ChunkResult), cached: true };
+  const result: ChunkResult = { ...(value as unknown as ChunkResult), ...parsed, status: 'succeeded', error: undefined, httpStatus: undefined, cached: true };
+  if (value.status !== 'succeeded') {
+    result.responseReprocessed = true;
+    if (persistRecovery) await writeArtifact(directory, `${chunk.id}.json`, result);
+  }
+  return result;
 }
 export async function transcribeSession(guild: string, session: string, config: SttConfig, options: { dryRun?: boolean; force?: boolean } = {}, dependencies: ApiDependencies = {}) {
   const directory = await existingSession(config.root, guild, session);
@@ -172,7 +189,7 @@ export async function transcribeSession(guild: string, session: string, config: 
     }
     const cached = new Map<string, ChunkResult>();
     if (!options.force && cacheDirectory) for (const chunk of plan.chunks) {
-      const result = await cachedResult(cacheDirectory, chunk, config.model); if (result) cached.set(chunk.id, result);
+      const result = await cachedResult(cacheDirectory, chunk, config.model, config.enabled && !options.dryRun); if (result) cached.set(chunk.id, result);
     }
     const pending = plan.chunks.filter(c => !cached.has(c.id));
     const pendingSeconds = pending.reduce((sum, c) => sum + c.samples / SAMPLE_RATE, 0);
@@ -213,11 +230,8 @@ export async function transcribeSession(guild: string, session: string, config: 
               form.append('definition', JSON.stringify(azureDefinition(config)));
               return { method: 'POST', headers: { 'Ocp-Apim-Subscription-Key': config.key }, body: form };
             }, config, localBudget, chunk.samples / SAMPLE_RATE, dependencies);
-            Object.assign(result, parseAzureResult(value, chunk, config.model), { status: 'succeeded' });
-            const response = value as AzureTranscript;
-            result.response = { durationMilliseconds: response.durationMilliseconds,
-              combinedPhrases: response.combinedPhrases.map(p => ({ text: p.text })),
-              phrases: response.phrases.map(p => ({ text: p.text, offsetMilliseconds: p.offsetMilliseconds, durationMilliseconds: p.durationMilliseconds })) };
+            result.response = azureTranscript(value);
+            Object.assign(result, parseAzureResult(result.response, chunk, config.model), { status: 'succeeded' });
           } catch (error) {
             const failure = error instanceof ApiError ? error : new ApiError('input_changed');
             result.status = ['empty_transcript','unmapped_timestamp'].includes(failure.code) ? 'needs_review' : 'failed';
@@ -228,6 +242,10 @@ export async function transcribeSession(guild: string, session: string, config: 
           result.usage = localStats;
           // forceで失敗しても前回の成功キャッシュを上書きしない。
           if (result.status === 'succeeded') await writeArtifact(cacheDirectory!, `${chunk.id}.json`, result);
+          else if (result.response && !await cachedResult(cacheDirectory!, chunk, config.model)) {
+            // 構造を読める失敗応答は再検査用に保持。ただし前回成功は置換しない。
+            await writeArtifact(cacheDirectory!, `${chunk.id}.json`, result);
+          }
         }
         results.push(result);
         const captured = [...results]; const usage = { ...budget.stats };
